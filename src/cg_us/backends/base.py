@@ -184,19 +184,35 @@ def build_index(ctx: RunContext, gro: str, top: str = "topol.top", out: str = "i
 
 def setup_restraints(ctx: RunContext, top: str = "topol.top") -> list[str]:
     top_path = ctx.workdir / top
-    mapping = topology.chain_moltypes(top_path, ctx.entry.target, ctx.entry.binder,
-                                      chain_order(ctx))
+    mapping = topology.chain_moltype_groups(top_path, ctx.entry.target, ctx.entry.binder,
+                                            chain_order(ctx))
     added = []
     if ctx.proto.smd.restrain_target:
-        mt = mapping["Target"]
-        topology.restraint_itp(top_path, mt, ctx.workdir / "posre_target.itp", selection="backbone")
-        where = topology.wire_restraints(top_path, mt, "posre_target.itp", "POSRES_TARGET")
-        added.append(f"POSRES_TARGET -> {mt} in {Path(where).name}")
+        added += _restrain_group(ctx, top_path, mapping["Target"], "target",
+                                 "POSRES_TARGET", "backbone", None)
     if ctx.entry.restrain_binder:
-        mt = mapping["Binder"]
-        topology.restraint_itp(top_path, mt, ctx.workdir / "posre_binder.itp", selection="ca", k=200.0)
-        where = topology.wire_restraints(top_path, mt, "posre_binder.itp", "POSRES_BINDER")
-        added.append(f"POSRES_BINDER -> {mt} in {Path(where).name}")
+        added += _restrain_group(ctx, top_path, mapping["Binder"], "binder",
+                                 "POSRES_BINDER", "ca", 200.0)
+    return added
+
+
+def _restrain_group(ctx: RunContext, top_path: Path, moltypes: list[str], label: str,
+                    define: str, selection: str, k: float | None) -> list[str]:
+    """Restrain every molecule type of the group, not just the first.
+
+    A group spanning several chains has to be pinned chain by chain: each chain
+    is its own [ moleculetype ] and takes its own position_restraints block. Pin
+    one and leave the others free and the unpinned chains drift, the group COM
+    drifts with them, and the reaction coordinate stops measuring the
+    separation it is named after.
+    """
+    added = []
+    for mt in moltypes:
+        itp = f"posre_{label}.itp" if len(moltypes) == 1 else f"posre_{label}_{mt}.itp"
+        kw = {} if k is None else {"k": k}
+        topology.restraint_itp(top_path, mt, ctx.workdir / itp, selection=selection, **kw)
+        where = topology.wire_restraints(top_path, mt, itp, define)
+        added.append(f"{define} -> {mt} in {Path(where).name}")
     return added
 
 
@@ -311,16 +327,18 @@ def verify_cyclisation(ctx: RunContext, top: str = "topol.top") -> list[str]:
     expected = {ch: r.get("cyclic") for ch, r in reports.items()}
     if not any(expected.values()):
         return []
-    mapping = topology.chain_moltypes(ctx.workdir / top, ctx.entry.target,
-                                      ctx.entry.binder, chain_order(ctx))
-    labels = {"Target": ctx.entry.target, "Binder": ctx.entry.binder}
-    broken = []
-    for label, mt_name in mapping.items():
-        if not expected.get(labels[label]):
-            continue
-        mt = topology.moltype(ctx.workdir / top, mt_name)
-        if mt is None or not topology.is_cyclic(mt):
-            broken.append(f"{label} (chain {labels[label]}, {mt_name})")
+    mapping = topology.chain_moltype_groups(ctx.workdir / top, ctx.entry.target,
+                                            ctx.entry.binder, chain_order(ctx))
+    labels = {"Target": ctx.entry.target_chains, "Binder": ctx.entry.binder_chains}
+    checked, broken = [], []
+    for label, mt_names in mapping.items():
+        for ch, mt_name in zip(labels[label], mt_names):
+            if not expected.get(ch):
+                continue
+            checked.append(f"{label} (chain {ch}, {mt_name})")
+            mt = topology.moltype(ctx.workdir / top, mt_name)
+            if mt is None or not topology.is_cyclic(mt):
+                broken.append(f"{label} (chain {ch}, {mt_name})")
     if broken:
         raise GmxError(
             "pdb2gmx did not close the backbone ring of " + ", ".join(broken) + ".\n"
@@ -329,7 +347,7 @@ def verify_cyclisation(ctx: RunContext, top: str = "topol.top") -> list[str]:
             f"{ctx.prefix}.pdb (GROMACS issue 5091) and that the N-C distance is "
             "inside the -sb/-lb window."
         )
-    return [f"ring closed: {b}" for b in mapping]
+    return [f"ring closed: {b}" for b in checked]
 
 
 FMAX_RE = re.compile(r"^Maximum force\s*=\s*(\S+)", re.M)
@@ -374,8 +392,35 @@ def pull_pbcatoms(ctx: RunContext, gro: str = "solv_ions.gro",
         xyz = coords[idx]
         d = xyz - xyz.mean(axis=0)
         d -= box * np.round(d / box)
-        picked[label] = int(idx[int(np.argmin(np.linalg.norm(d, axis=1)))]) + 1
+        centre = int(np.argmin(np.linalg.norm(d, axis=1)))
+        picked[label] = int(idx[centre]) + 1
+        _check_group_fits_box(label, xyz, xyz[centre], box)
     return picked
+
+
+def _check_group_fits_box(label: str, xyz: np.ndarray, ref: np.ndarray,
+                          box: np.ndarray) -> None:
+    """A pull group must fit within half a box vector of its reference atom.
+
+    gmx rebuilds the group COM by min-imaging every atom against the reference
+    atom, so an atom further away than half a box vector is imaged to the wrong
+    side and the COM lands somewhere between the two halves - silently, with a
+    reaction coordinate that is simply wrong. Coordinates are read as editconf
+    left them, i.e. the group is contiguous, so the raw spread is the real one.
+    A single chain almost never trips this; a multi-chain group is a different
+    size class, and the box was sized for the complex extent plus a margin.
+    """
+    reach = np.abs(xyz - ref).max(axis=0)
+    if np.any(reach >= 0.5 * box):
+        worst = int(np.argmax(reach / box))
+        raise GmxError(
+            f"pull group {label} reaches {reach[worst]:.2f} nm from its reference atom "
+            f"along {'xyz'[worst]}, which is past half the box ({box[worst]:.2f} nm).\n"
+            "gmx would min-image the far atoms to the wrong side, so the group COM - and "
+            "the whole reaction coordinate - would be wrong without any warning.\n"
+            "Enlarge the box (prep.box_edge_xy / prep.box_edge_z), or keep only the "
+            "chains that actually form the interface in the pull group."
+        )
 
 
 def write_pull_pbcatoms(ctx: RunContext, atoms: dict[str, int],

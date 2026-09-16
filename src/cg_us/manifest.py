@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from cg_us.structure import parse_chains
+
 R_KCAL = 1.987204259e-3
 DEFAULT_T = 298.15
 
@@ -31,6 +33,23 @@ class Entry:
     binder_seq: str = ""
     binder_length: int | None = None
     caveats: str = ""
+
+    @property
+    def target_chains(self) -> list[str]:
+        return parse_chains(self.target)
+
+    @property
+    def binder_chains(self) -> list[str]:
+        return parse_chains(self.binder)
+
+    @property
+    def all_chains(self) -> list[str]:
+        """Every chain the run touches, target group first."""
+        return self.target_chains + self.binder_chains
+
+    @property
+    def multi_chain(self) -> bool:
+        return len(self.all_chains) > 2
 
     @property
     def in_regression(self) -> bool:
@@ -89,6 +108,14 @@ def read_manifest(path: str | Path, root: str | Path | None = None) -> list[Entr
                 caveats=_str(row.get("caveats")),
             )
         )
+
+    for e in entries:
+        shared = sorted(set(e.target_chains) & set(e.binder_chains))
+        if shared:
+            raise ValueError(
+                f"{e.name}: chain(s) {', '.join(shared)} appear in both the target and "
+                "the binder group; the two pull groups cannot share atoms"
+            )
 
     names = [e.name for e in entries]
     dupes = {n for n in names if names.count(n) > 1}

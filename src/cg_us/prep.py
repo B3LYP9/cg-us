@@ -81,9 +81,16 @@ def _chain_order(entry: Entry, reports: dict[str, structure.ChainReport]) -> lis
     1.3 A apart, EM reported an infinite force and the run died in the first
     GPU step. Leading with the cyclic chain is the upstream workaround.
     """
-    if reports[entry.binder].cyclic and not reports[entry.target].cyclic:
-        return [entry.binder, entry.target]
-    return [entry.target, entry.binder]
+    chains = entry.all_chains
+    cyclic = [ch for ch in chains if reports[ch].cyclic]
+    if len(cyclic) > 1:
+        raise ValueError(
+            f"{entry.name}: chains {', '.join(cyclic)} are all cyclic, and pdb2gmx closes "
+            "the ring of the first chain only (GROMACS issue 5091), so every later one "
+            "would come out linear with charged termini a bond length apart. Build the "
+            "system from a pre-cyclised topology instead."
+        )
+    return cyclic + [ch for ch in chains if ch not in cyclic]
 
 
 def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
@@ -93,18 +100,21 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
 
     atoms = structure.read_pdb(entry.pdb)
     present = structure.chains(atoms)
-    for ch, label in ((entry.target, "target"), (entry.binder, "binder")):
-        if ch not in present:
-            raise ValueError(f"{entry.name}: {label} chain '{ch}' absent (chains: {', '.join(present)})")
+    for chs, label in ((entry.target_chains, "target"), (entry.binder_chains, "binder")):
+        for ch in chs:
+            if ch not in present:
+                raise ValueError(f"{entry.name}: {label} chain '{ch}' absent "
+                                 f"(chains: {', '.join(present)})")
 
-    kept = [a for a in atoms if a.chain in (entry.target, entry.binder)]
+    group_chains = entry.all_chains
+    kept = [a for a in atoms if a.chain in set(group_chains)]
     lb = effective_lb(entry, proto)
     reports = {
         ch: structure.describe_chain(kept, ch, cyclic_min=proto.prep.cyclic_sb * 10,
                                      cyclic_max=lb * 10)
-        for ch in (entry.target, entry.binder)
+        for ch in group_chains
     }
-    oriented, geom = structure.orient_for_pull(kept, entry.target, entry.binder)
+    oriented, geom = structure.orient_for_pull(kept, entry.target_chains, entry.binder_chains)
 
     chain_order = _chain_order(entry, reports)
     input_pdb = sysdir / f"{entry.name}.pdb"
@@ -125,6 +135,8 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
         "source_pdb": str(entry.pdb),
         "target_chain": entry.target,
         "binder_chain": entry.binder,
+        "target_chains": entry.target_chains,
+        "binder_chains": entry.binder_chains,
         "role": entry.role,
         "dg_exp": entry.dg_exp,
         "dg_exp_source": entry.dg_exp_source,
@@ -134,6 +146,8 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
         "chain_order": chain_order,
         "n_atoms_kept": len(kept),
         "com_distance_nm": round(geom["com_distance_nm"], 3),
+        "target_extent_nm": [round(v, 3) for v in geom["target_extent_nm"]],
+        "binder_extent_nm": [round(v, 3) for v in geom["binder_extent_nm"]],
         "box_nm": [round(float(v), 3) for v in box],
         "box_z_driver": z_driver,
         "center_nm": [round(float(v), 3) for v in center],
@@ -169,33 +183,35 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
 def _warnings(entry: Entry, reports: dict[str, structure.ChainReport],
               proto: Protocol, lb: float) -> list[str]:
     out: list[str] = []
-    binder = reports[entry.binder]
-    d = binder.head_tail_distance
     sb_a, lb_a = proto.prep.cyclic_sb * 10, lb * 10
-
     clamped = lb < proto.prep.cyclic_lb
-    if clamped and d is not None and lb_a < d < proto.prep.cyclic_lb * 10:
-        out.append(
-            f"binder chain {entry.binder}: N(first)-C(last) = {d:.2f} A would fall inside the "
-            f"requested -lb {proto.prep.cyclic_lb} nm window, but the manifest calls the binder "
-            f"'{entry.cyclic_type}' rather than head-to-tail, so -lb is clamped to {lb} nm here "
-            "and the termini stay free (prep.cyclic_lb_from_manifest: false to override)"
-        )
-    if binder.cyclic:
-        out.append(
-            f"binder chain {entry.binder}: N(first)-C(last) = {d:.2f} A, inside the pdb2gmx "
-            f"ring-closure window (-sb {proto.prep.cyclic_sb} to -lb {lb} nm) -> backbone "
-            "will be closed automatically; verify the bond in topol.top once"
-        )
-    elif d is not None and entry.head_to_tail:
-        out.append(
-            f"binder chain {entry.binder}: manifest says '{entry.cyclic_type}' but "
-            f"N(first)-C(last) = {d:.2f} A is outside the ring-closure window "
-            f"({sb_a:.1f}-{lb_a:.1f} A); pdb2gmx will build charged termini instead"
-        )
-    if binder.disulfides:
-        pairs = ", ".join(f"{a}-{b}" for a, b in binder.disulfides)
-        out.append(f"binder disulfides detected at residues {pairs}; verify specbond handling")
+
+    for bch in entry.binder_chains:
+        binder = reports[bch]
+        d = binder.head_tail_distance
+        if clamped and d is not None and lb_a < d < proto.prep.cyclic_lb * 10:
+            out.append(
+                f"binder chain {bch}: N(first)-C(last) = {d:.2f} A would fall inside the "
+                f"requested -lb {proto.prep.cyclic_lb} nm window, but the manifest calls the binder "
+                f"'{entry.cyclic_type}' rather than head-to-tail, so -lb is clamped to {lb} nm here "
+                "and the termini stay free (prep.cyclic_lb_from_manifest: false to override)"
+            )
+        if binder.cyclic:
+            out.append(
+                f"binder chain {bch}: N(first)-C(last) = {d:.2f} A, inside the pdb2gmx "
+                f"ring-closure window (-sb {proto.prep.cyclic_sb} to -lb {lb} nm) -> backbone "
+                "will be closed automatically; verify the bond in topol.top once"
+            )
+        elif d is not None and entry.head_to_tail:
+            out.append(
+                f"binder chain {bch}: manifest says '{entry.cyclic_type}' but "
+                f"N(first)-C(last) = {d:.2f} A is outside the ring-closure window "
+                f"({sb_a:.1f}-{lb_a:.1f} A); pdb2gmx will build charged termini instead"
+            )
+        if binder.disulfides:
+            pairs = ", ".join(f"{a}-{b}" for a, b in binder.disulfides)
+            out.append(f"binder chain {bch} disulfides at residues {pairs}; "
+                       "verify specbond handling")
     for ch, rep in reports.items():
         if rep.nonstandard:
             out.append(f"chain {ch}: non-standard residues {', '.join(rep.nonstandard)}")

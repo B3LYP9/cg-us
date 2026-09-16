@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from cg_us.structure import parse_chains
+
 MOLTYPE_RE = re.compile(r"^\s*\[\s*moleculetype\s*\]\s*$")
 SECTION_RE = re.compile(r"^\s*\[\s*(\w+)\s*\]\s*$")
 INCLUDE_RE = re.compile(r'^\s*#include\s+"([^"]+)"')
@@ -129,49 +131,73 @@ def moltype(top: str | Path, name: str) -> MolType | None:
 
 
 def _resolve_chains(moltypes: list[MolType], molecules: list[tuple[str, int]],
-                    target_chain: str, binder_chain: str,
-                    order: list[str] | None = None) -> dict[str, str]:
-    """Map Target/Binder onto molecule type names.
+                    target_chain, binder_chain,
+                    order: list[str] | None = None) -> dict[str, list[str]]:
+    """Map Target/Binder onto molecule type names, one name per chain.
 
-    Preferred route is the ``chain_X`` suffix pdb2gmx writes. If chain letters
-    were lost (single-chain naming, merged chains, renamed molecule types), fall
-    back on order: cg-us writes the input PDB with the target chain first, so
-    the first protein molecule type in [ molecules ] is the target.
+    Either group may span several chains (``"M+N"``), so each label resolves to
+    a *list* of molecule types in the order its chains were named. Preferred
+    route is the ``chain_X`` suffix pdb2gmx writes. If chain letters were lost
+    (single-chain naming, merged chains, renamed molecule types), fall back on
+    the order the chains were written to the input PDB: the n-th protein
+    molecule type in [ molecules ] is the n-th chain written.
     """
+    tchains, bchains = parse_chains(target_chain), parse_chains(binder_chain)
     by_chain = {m.chain: m.name for m in moltypes if m.chain}
-    if target_chain in by_chain and binder_chain in by_chain:
-        return {"Target": by_chain[target_chain], "Binder": by_chain[binder_chain]}
+    if all(c in by_chain for c in tchains + bchains):
+        return {"Target": [by_chain[c] for c in tchains],
+                "Binder": [by_chain[c] for c in bchains]}
 
     by_name = {m.name: m for m in moltypes}
     ordered = [name for name, _ in molecules
                if name in by_name and by_name[name].is_protein]
     unique = list(dict.fromkeys(ordered))
-    if len(unique) >= 2:
-        written = order or [target_chain, binder_chain]
-        first = "Target" if written[0] == target_chain else "Binder"
-        second = "Binder" if first == "Target" else "Target"
-        return {first: unique[0], second: unique[1]}
+    written = list(order) if order else tchains + bchains
+    if len(unique) >= len(written) and set(written) == set(tchains + bchains):
+        pos = dict(zip(written, unique))
+        return {"Target": [pos[c] for c in tchains], "Binder": [pos[c] for c in bchains]}
 
     found = ", ".join(m.name for m in moltypes) or "none"
     raise ValueError(
-        f"cannot map chains {target_chain}/{binder_chain} onto molecule types "
+        f"cannot map chains {'+'.join(tchains)}/{'+'.join(bchains)} onto molecule types "
         f"(found: {found}). Expected pdb2gmx to emit one protein molecule type "
         "per chain; check that the input PDB kept its chain IDs and TER records."
     )
 
 
-def chain_moltypes(top: str | Path, target_chain: str, binder_chain: str,
-                   order: list[str] | None = None) -> dict[str, str]:
-    """{'Target': <moleculetype>, 'Binder': <moleculetype>}."""
+def chain_moltype_groups(top: str | Path, target_chain, binder_chain,
+                         order: list[str] | None = None) -> dict[str, list[str]]:
+    """{'Target': [<moleculetype>, ...], 'Binder': [...]} - one entry per chain."""
     moltypes, molecules = parse_topology(top)
     return _resolve_chains(moltypes, molecules, target_chain, binder_chain, order)
 
 
-def pull_group_indices(top: str | Path, target_chain: str, binder_chain: str,
+def chain_moltypes(top: str | Path, target_chain: str, binder_chain: str,
+                   order: list[str] | None = None) -> dict[str, str]:
+    """{'Target': <moleculetype>, 'Binder': <moleculetype>}; single-chain groups only."""
+    groups = chain_moltype_groups(top, target_chain, binder_chain, order)
+    flat: dict[str, str] = {}
+    for label, names in groups.items():
+        if len(names) != 1:
+            raise ValueError(
+                f"{label} spans {len(names)} chains ({', '.join(names)}); "
+                "call chain_moltype_groups() instead of chain_moltypes()")
+        flat[label] = names[0]
+    return flat
+
+
+def pull_group_indices(top: str | Path, target_chain, binder_chain,
                        order: list[str] | None = None) -> dict[str, list[int]]:
     moltypes, molecules = parse_topology(top)
     mapping = _resolve_chains(moltypes, molecules, target_chain, binder_chain, order)
-    wanted = {name: label for label, name in mapping.items()}
+    wanted: dict[str, str] = {}
+    for label, names in mapping.items():
+        for name in names:
+            if wanted.setdefault(name, label) != label:
+                raise ValueError(
+                    f"molecule type '{name}' is claimed by both pull groups: pdb2gmx "
+                    "merged chains that belong to different groups, so their atoms "
+                    "cannot be told apart. Give the chains distinct IDs in the input PDB.")
     by_name = {m.name: m for m in moltypes}
 
     offset = 0

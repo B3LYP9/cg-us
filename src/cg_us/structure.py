@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +96,51 @@ def select(atoms: list[Atom], chain: str) -> list[Atom]:
     return picked
 
 
+_CHAIN_SEP = re.compile(r"[+,/;\s]+")
+
+
+def parse_chains(spec) -> list[str]:
+    """Chain IDs of one pull group: ``"A"``, ``"M+N"``, or ``["M", "N"]``.
+
+    A pull group may span several chains - a receptor dimer, a binder grafted
+    onto two strands. ``+``, ``,``, ``/`` and whitespace all separate.
+    """
+    parts = _CHAIN_SEP.split(spec.strip()) if isinstance(spec, str) else [str(c).strip() for c in spec]
+    out: list[str] = []
+    for p in parts:
+        if not p:
+            continue
+        if p in out:
+            raise ValueError(f"chain '{p}' is listed twice in '{spec}'")
+        out.append(p)
+    if not out:
+        raise ValueError(f"no chain ID in '{spec}'")
+    return out
+
+
+def select_chains(atoms: list[Atom], spec) -> list[Atom]:
+    """Atoms of one pull group, which may span several chains."""
+    wanted = parse_chains(spec)
+    present = chains(atoms)
+    missing = [c for c in wanted if c not in present]
+    if missing:
+        raise ValueError(f"chain(s) {', '.join(missing)} not present "
+                         f"(available: {', '.join(present)})")
+    keep = set(wanted)
+    return [a for a in atoms if a.chain in keep]
+
+
+def group_extent(atoms: list[Atom]) -> np.ndarray:
+    """Per-axis extent of one pull group, in angstrom.
+
+    Directly comparable with the box vectors: the min-image reconstruction of a
+    group COM needs every atom within half a box vector of the reference atom
+    along each axis, so it is the per-axis extent that decides, not a diameter.
+    """
+    xyz = np.array([a.xyz for a in atoms])
+    return xyz.max(axis=0) - xyz.min(axis=0)
+
+
 def com(atoms: list[Atom]) -> np.ndarray:
     return np.mean([a.xyz for a in atoms], axis=0)
 
@@ -167,9 +213,13 @@ def rotation_to_z(vector: np.ndarray) -> np.ndarray:
     return np.eye(3) + K * s + K @ K * (1 - c)
 
 
-def orient_for_pull(atoms: list[Atom], target: str, binder: str) -> tuple[list[Atom], dict]:
-    """Rotate the complex so that target-COM -> binder-COM points along +z."""
-    t, b = select(atoms, target), select(atoms, binder)
+def orient_for_pull(atoms: list[Atom], target, binder) -> tuple[list[Atom], dict]:
+    """Rotate the complex so that target-COM -> binder-COM points along +z.
+
+    ``target`` and ``binder`` each name one pull group and may span several
+    chains (``"M+N"`` or ``["M", "N"]``); the COM is taken over the whole group.
+    """
+    t, b = select_chains(atoms, target), select_chains(atoms, binder)
     axis = com(b) - com(t)
     d0 = float(np.linalg.norm(axis))
     rot = rotation_to_z(axis)
@@ -189,6 +239,8 @@ def orient_for_pull(atoms: list[Atom], target: str, binder: str) -> tuple[list[A
     info = {
         "com_distance_nm": d0 / 10.0,
         "extent_nm": ((coords.max(axis=0) - coords.min(axis=0)) / 10.0).tolist(),
+        "target_extent_nm": (group_extent(t) / 10.0).tolist(),
+        "binder_extent_nm": (group_extent(b) / 10.0).tolist(),
     }
     return rotated, info
 
