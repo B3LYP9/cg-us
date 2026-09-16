@@ -2,6 +2,18 @@ replicas: 3
 seed_base: 20181
 temperature: 310.0
 
+# Multi-chain pull groups (since 0.14.0): manifest.csv's target/binder columns
+# accept a single chain ("A") or a group of chains joined by "+", ",", "/" or
+# whitespace ("M+N"). Every setting below that talks about "the target" or
+# "the binder" applies to the whole group, not one chain - e.g. restrain_target
+# restrains every chain of the target group, and box_edge_xy/z must clear the
+# group's full extent, not a single chain's.
+#   target,binder
+#   A,B                 # single chain vs single chain (as before)
+#   M+N,P                # two-chain target group (e.g. a receptor/ligand dimer)
+#                         # vs one binder chain
+#   A,C+D                 # one target chain vs a two-chain binder group
+
 prep:
   force_field: charmm36-jul2022
   water: tip3p
@@ -16,10 +28,17 @@ prep:
   cyclic_lb_from_manifest: true
   box_edge_xy: 1.2     # nm per side -> 2.4 nm between periodic images, which is
                        # 2*rvdw; at 1.0 the big ectodomain binders saw themselves
+                       # sized for one chain's extent; a multi-chain group (e.g.
+                       # a receptor dimer) needs this margin over the GROUP's
+                       # extent (prep.json's target_extent_nm/binder_extent_nm),
+                       # not a single chain's - widen it if _check_group_fits_box
+                       # aborts a run
   box_edge_z: 1.0
   em_fmax_max: 5000    # kJ/mol/nm; EM above this aborts the run instead of
                        # handing a broken topology to the GPU
-  pull_pbcatom: true   # name a spatially central reference atom per pull group
+  pull_pbcatom: true   # name a spatially central reference atom per pull group;
+                       # for a multi-chain group this atom is chosen over all of
+                       # the group's chains together, not per chain
   constraints: all-bonds  # h-bonds leaves the carboxylate C=O free: 22 fs period against
                           # a 4 fs step is five steps per oscillation, and a window
                           # integrates into a nan every few hundred windows
@@ -34,7 +53,12 @@ smd:
   k: 1000.0              # kJ/mol/nm^2
   time_ns: 2.0           # 2 ns at 0.001 nm/ps -> 2.0 nm of pulling
   dt: 0.004
-  restrain_target: true  # backbone-only posre on the target, biased stages only
+  restrain_target: true  # backbone-only posre on the target, biased stages only;
+                          # for a multi-chain target group every chain gets its
+                          # own posre_target_<moltype>.itp - restraining only one
+                          # chain would let the rest of the group drift, and the
+                          # group COM (what the reaction coordinate measures)
+                          # would drift with it
 
 umbrella:
   dense_spacing: 0.1     # nm, used while xi < dense_until (steep part of the PMF)
