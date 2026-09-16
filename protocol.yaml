@@ -51,7 +51,7 @@ prep:
 smd:
   rate: 0.001            # nm/ps; slow pulling gives far better window starting points
   k: 1000.0              # kJ/mol/nm^2
-  time_ns: 2.0           # 2 ns at 0.001 nm/ps -> 2.0 nm of pulling
+  time_ns: 2.5           # 2.5 ns at 0.001 nm/ps -> 2.5 nm, matches umbrella.max_distance
   dt: 0.004
   restrain_target: true  # backbone-only posre on the target, biased stages only;
                           # for a multi-chain target group every chain gets its
@@ -61,26 +61,28 @@ smd:
                           # would drift with it
 
 umbrella:
-  dense_spacing: 0.1     # nm, used while xi < dense_until (steep part of the PMF)
-  dense_until: 1.0       # nm past the bound-state minimum
-  window_spacing: 0.2    # nm in the flat tail
-  k: 1000.0
-  time_ns: 3.0           # base pass; under-sampled windows are grown by cg-us extend
-  extend_ns: 3.0         # chunk added per extension round
-  max_ns: 24.0           # per-window ceiling
+  dense_spacing: 0.1     # nm while xi < dense_until: the well and the barrier
+  dense_until: 1.5       # validation run put the unbinding barrier ~1.2-1.4 nm past d0 -
+                         # a two-chain target group pulls the barrier out further than
+                         # the single-chain benchmarks this default (1.0) was tuned on
+  window_spacing: 0.15   # nm in the tail; at k=1000 this gives overlap ~0.14
+  k: 1000.0              # sigma = sqrt(kT/k) = 0.051 nm, matched to 0.1 nm spacing
+  time_ns: 5.0           # base pass; under-sampled windows are grown by cg-us extend
+  extend_ns: 5.0         # chunk added per extension round
+  max_ns: 30.0           # per-window ceiling
   min_neff: 50.0         # effective samples below which a window is extended
   max_drift_sd: 0.5      # mean of xi may drift this many sd between halves
   equil_ns: 0.5
   discard_ns: 0.5        # dropped from the head of every window before WHAM
-  max_distance: 2.0
-  dt: 0.004              # needs prep.heavy_hydrogens
+  max_distance: 2.5
+  dt: 0.004              # needs prep.mass_repartition_factor and prep.constraints
   barostat: C-rescale    # correct NPT sampling and friendly to -update gpu
 
 wham:
   bootstraps: 200
   method: b-hist
   unit: kCal
-  bins: 200
+  bins: 250              # ~0.01 nm per bin over the reaction coordinate
   tolerance: 1.0e-6
   temperature: null      # defaults to the simulation temperature
 
@@ -105,12 +107,12 @@ run:
   window_workers: 3      # windows sharing the one GPU; 7 workers bought only
                          # ~15% aggregate throughput and stretched a 5 ns window
                          # from 10 min to an hour - 3 is the measured sweet spot
-  skip_movie: false      # true bypasses the PyMOL movie at stage 13
+  skip_movie: true       # chaperong backend only, inert under direct
   movie_frames: 0        # 0 = CHAPERONg default (200-300); lower = much faster
   pymol_headless: true
 
 analysis:
-  plateau_width: 0.4     # nm of the PMF tail averaged as the unbound reference
+  plateau_width: 0.5     # nm of the PMF tail averaged as the unbound reference
   overlap_min: 0.03
   jacobian_correction: false
   exclude_roles: ["negative_control"]
