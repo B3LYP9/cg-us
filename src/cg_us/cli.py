@@ -1,0 +1,421 @@
+"""Command line interface."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from . import analysis, experiment, plots, prep, report, wham
+from .backends import chaperong as chaperong_backend
+from .backends import direct as direct_backend
+from .backends.base import RunContext
+from .config import Protocol
+from .manifest import Entry, read_manifest
+
+
+def _entries(root: Path) -> list[Entry]:
+    state = json.loads((root / "run_state.json").read_text())
+    return read_manifest(state["manifest"], state["manifest_root"])
+
+
+def _protocol(root: Path) -> Protocol:
+    return Protocol.load(root / "protocol.yaml")
+
+
+def cmd_validate(args) -> int:
+    entries = read_manifest(args.manifest, args.data_root)
+    rows = []
+    for e in entries:
+        rows.append({
+            "system": e.name,
+            "pdb": e.pdb.name,
+            "target": e.target,
+            "binder": e.binder,
+            "role": e.role,
+            "dG_exp": None if e.dg_exp is None else round(e.dg_exp, 3),
+            "source": e.dg_exp_source,
+            "cyclic": e.cyclic_type or "",
+        })
+    df = pd.DataFrame(rows)
+    print(df.to_string(index=False))
+    n_exp = df["dG_exp"].notna().sum()
+    print(f"\n{len(entries)} systems, {n_exp} with experimental ΔG, "
+          f"{len(entries) - n_exp} without (controls / unknowns)")
+    return 0
+
+
+def cmd_prep(args) -> int:
+    root = Path(args.root)
+    root.mkdir(parents=True, exist_ok=True)
+    proto = Protocol.load(args.protocol)
+    if args.replicas:
+        proto.replicas = args.replicas
+    if args.backend:
+        proto.run.backend = args.backend
+    proto.validate()
+    proto.dump(root / "protocol.yaml")
+
+    u = proto.umbrella
+    print(f"[prep] {u.time_ns} ns/window, dt {u.dt * 1000:.0f} fs, "
+          f"constraints {proto.prep.constraints}, "
+          f"spacing {u.dense_spacing}/{u.window_spacing} nm over {u.max_distance} nm, "
+          f"{proto.replicas} replicas")
+
+    entries = read_manifest(args.manifest, args.data_root)
+    if getattr(args, "system", None):
+        entries = [e for e in entries if e.name in args.system]
+        if not entries:
+            print("[prep] no manifest entry matched --system")
+            return 1
+    infos = []
+    for e in entries:
+        info = prep.prepare_entry(e, proto, root, ff_source=args.ff_dir)
+        infos.append(info)
+        flag = "  ".join(info["warnings"])
+        print(f"[prep] {e.name:<24} box {info['box_nm']} ({info['box_z_driver']})  "
+              f"d0 {info['com_distance_nm']:.2f} nm  pull {proto.umbrella.max_distance} "
+              f"of {info['max_pull_distance_nm']} nm available"
+              + (f"\n        ! {flag}" if flag else ""))
+
+    (root / "run_state.json").write_text(json.dumps({
+        "manifest": str(Path(args.manifest).resolve()),
+        "manifest_root": str(Path(args.data_root or Path(args.manifest).parent).resolve()),
+        "systems": [i["name"] for i in infos],
+    }, indent=2))
+    pd.DataFrame([{k: v for k, v in i.items() if not isinstance(v, (dict, list))}
+                  for i in infos]).to_csv(root / "systems.csv", index=False)
+    print(f"\nprepared {len(infos)} systems x {proto.replicas} replicas in {root}")
+    return 0
+
+
+def cmd_run(args) -> int:
+    root = Path(args.root)
+    proto = _protocol(root)
+    if args.backend:
+        proto.run.backend = args.backend
+    if getattr(args, "chaperong", None):
+        proto.run.chaperong = args.chaperong
+    entries = _entries(root)
+    if args.system:
+        entries = [e for e in entries if e.name in args.system]
+
+    from .backends.base import available_cores, threads_per_worker
+    workers = max(1, proto.run.window_workers)
+    print(f"[run] {available_cores(proto)} cores, {workers} window(s) at a time, "
+          f"{threads_per_worker(proto, workers)} OpenMP threads each"
+          + ("" if proto.run.backend == "direct" else "  (chaperong runs windows one by one)"))
+
+    if proto.run.backend == "chaperong" and not args.dry_run:
+        launcher, cg_root = chaperong_backend.preflight(proto)
+        print(f"[run] CHAPERONg: {launcher} (CHAPERONg_PATH={cg_root})")
+
+    for e in entries:
+        for rep in range(1, proto.replicas + 1):
+            if args.replica and rep != args.replica:
+                continue
+            wd = prep.replica_dir(root, e, rep)
+            ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
+            windows = wd / "tpr_files.dat"
+            if windows.exists() and windows.read_text().strip() and not args.force:
+                print(f"[run] {e.name} rep{rep}: already sampled, skipping")
+                continue
+            print(f"[run] {e.name} rep{rep} via {proto.run.backend} in {wd}")
+            if args.dry_run:
+                continue
+            if proto.run.backend == "chaperong":
+                chaperong_backend.run(ctx, from_stage=args.from_stage)
+            else:
+                direct_backend.run(ctx, start=args.start, stop=args.stop)
+    return 0
+
+
+def cmd_analyze(args) -> int:
+    root = Path(args.root)
+    proto = _protocol(root)
+    if getattr(args, "estimator", None):
+        proto.analysis.estimator = args.estimator
+    entries = _entries(root)
+
+    replica_records: list[dict] = []
+    summaries: list[dict] = []
+    figures: dict = {}
+
+    for e in entries:
+        records = []
+        for rep in range(1, proto.replicas + 1):
+            wd = prep.replica_dir(root, e, rep)
+            if not (wd / "tpr_files.dat").exists():
+                print(f"[analyze] {e.name} rep{rep}: no windows, skipped")
+                continue
+            print(f"[analyze] {e.name} rep{rep}")
+            rec = analysis.analyse_replica(wd, e, proto, rep,
+                                           do_convergence=not args.no_convergence)
+            rec["npz"] = str(wd / "analysis" / "pmf.npz")
+            rec["overlap"] = rec.pop("_detail")["overlap"]
+            records.append(rec)
+        if not records:
+            continue
+        replica_records.extend(records)
+        summaries.append(analysis.aggregate_system(records, e, proto))
+        figures[e.name] = _system_figures(root, e, records, proto)
+
+    if not summaries:
+        print("no completed systems to analyse", file=sys.stderr)
+        return 1
+
+    comparison = experiment.compare(summaries, proto)
+    out = root / "analysis"
+    out.mkdir(exist_ok=True)
+
+    rep_df = analysis.replica_table(replica_records)
+    sys_df = analysis.system_table(summaries)
+    cmp_df = experiment.comparison_table(comparison)
+    rep_df.to_csv(out / "replicas.csv", index=False)
+    sys_df.to_csv(out / "systems.csv", index=False)
+    cmp_df.to_csv(out / "experiment_comparison.csv", index=False)
+    wham.save({"systems": summaries, "replicas":
+               [{k: v for k, v in r.items() if k not in ("overlap",)} for r in replica_records],
+               "comparison": comparison}, out / "results.json")
+
+    figures["_global"] = {
+        "correlation": str(plots.correlation(summaries, comparison, out / "correlation.png")),
+        "spread": str(plots.replica_spread(summaries, out / "replica_spread.png")),
+    }
+
+    tables = {"systems": sys_df, "replicas": rep_df, "comparison": cmp_df}
+    path = report.build(root, summaries, replica_records, comparison, figures, tables,
+                        json.loads(json.dumps(_protocol_dict(proto))))
+    used = sorted({r.get("dG_source") for r in replica_records if r.get("dG_source")})
+    n_ui = sum(1 for r in replica_records if r.get("dG_source") == "umbrella_integration")
+    print(f"\nestimators used: {', '.join(used) or 'none'}"
+          + (f" ({n_ui} of {len(replica_records)} replicas rescued by umbrella integration)"
+             if n_ui else ""))
+    print(f"report: {path}")
+    print(cmp_df.to_string(index=False))
+    return 0
+
+
+def _system_figures(root: Path, entry: Entry, records: list[dict], proto: Protocol) -> dict:
+    out = root / "analysis" / entry.name
+    out.mkdir(parents=True, exist_ok=True)
+    figs = {
+        "pmf": str(plots.pmf_profiles(entry.name, records, out / "pmf.png", entry.dg_exp)),
+        "overlap": str(plots.overlap_profile(entry.name, records, out / "overlap.png",
+                                             proto.analysis.overlap_min)),
+        "sampling": str(plots.window_sampling(entry.name, records, out / "window_sampling.png",
+                                              proto.umbrella.min_neff)),
+        "smd": str(plots.smd_force(entry.name, records, out / "smd_force.png")),
+        "convergence": str(plots.convergence(entry.name, records, out / "convergence.png")),
+    }
+    for r in records:
+        figs[f"hist_rep{r['replica']}"] = str(plots.window_histograms(
+            entry.name, r["replica"], Path(r["npz"]),
+            out / f"histograms_rep{r['replica']}.png", r["overlap"]))
+    return figs
+
+
+def _protocol_dict(proto: Protocol) -> dict:
+    from dataclasses import asdict
+    return asdict(proto)
+
+
+def cmd_extend(args) -> int:
+    from . import convergence as C
+
+    root = Path(args.root)
+    proto = _protocol(root)
+    u = proto.umbrella
+    entries = _entries(root)
+    if args.system:
+        entries = [e for e in entries if e.name in args.system]
+
+    total_added = 0.0
+    for e in entries:
+        for rep in range(1, proto.replicas + 1):
+            if args.replica and rep != args.replica:
+                continue
+            wd = prep.replica_dir(root, e, rep)
+            if not (wd / "tpr_files.dat").exists():
+                continue
+
+            for round_no in range(1, args.rounds + 1):
+                diag = C.survey(wd, u.discard_ns * 1000, u.min_neff, u.max_drift_sd)
+                plan = C.budget(diag, u.extend_ns, u.max_ns)
+                actionable = [p for p in plan if p["extend_ns"] > 0]
+                pd.DataFrame(diag).to_csv(wd / "window_diagnostics.csv", index=False)
+
+                done = sum(d.get("sampled_ns", 0) for d in diag)
+                print(f"[extend] {e.name} rep{rep} round {round_no}: "
+                      f"{len(diag)} windows, {done:.0f} ns sampled, "
+                      f"{len(actionable)} need more")
+                for p in actionable[:12]:
+                    print(f"          win{p['window']:>3} +{p['extend_ns']:.1f} ns  {p['reason']}")
+                capped = [p for p in plan if p.get("capped")]
+                for p in capped:
+                    print(f"          win{p['window']:>3} at the {u.max_ns} ns ceiling, "
+                          f"still: {p['reason']}")
+
+                if not actionable:
+                    print("          all windows converged")
+                    break
+                total_added += sum(p["extend_ns"] for p in actionable)
+                if args.dry_run:
+                    break
+                ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
+                direct_backend.extend_windows(ctx, actionable)
+
+    print(f"\n{'would add' if args.dry_run else 'added'} {total_added:.0f} ns in total")
+    return 0
+
+
+def cmd_bench(args) -> int:
+    from . import bench as B
+
+    root = Path(args.root)
+    proto = _protocol(root)
+    if args.workdir:
+        wd = Path(args.workdir)
+    else:
+        entries = _entries(root)
+        entry = next((e for e in entries if e.name == args.system), entries[0]) \
+            if args.system else entries[0]
+        wd = prep.replica_dir(root, entry, args.replica or 1)
+
+    print(f"[bench] {wd}  ({args.steps} steps per configuration)")
+    from .backends.base import available_cores
+    cores = available_cores(proto)
+    ntomp = tuple(args.ntomp) if args.ntomp else B.core_sweep(cores)
+    print(f"        {cores} cores visible, sweeping ntomp {list(ntomp)}")
+    df = B.benchmark(wd, gmx=proto.run.gmx, steps=args.steps, ntomp_values=ntomp,
+                     concurrency=tuple(args.concurrency), gpu_id=proto.run.gpu_id,
+                     keep=args.keep, cores=cores)
+
+    out = root / "analysis"
+    out.mkdir(exist_ok=True)
+    df.to_csv(out / "benchmark.csv", index=False)
+    print("\n" + df.to_string(index=False))
+
+    windows = args.windows or _expected_windows(proto)
+    rec = B.recommend(df, windows, proto.umbrella.time_ns, proto.replicas)
+    if rec:
+        print(f"\nfastest: {rec['best_config']} at {rec['best_aggregate_ns_per_day']} ns/day")
+        if "speedup_vs_nb_gpu" in rec:
+            print(f"  {rec['speedup_vs_nb_gpu']}x the '-nb gpu' baseline "
+                  f"({rec['baseline_hours_per_system']} h -> {rec['hours_per_system']} h)")
+        print(f"  {windows} windows x {proto.umbrella.time_ns} ns x {proto.replicas} replicas "
+              f"= {rec['total_ns_per_system']:.0f} ns -> ~{rec['hours_per_system']} h per system")
+    return 0
+
+
+def _expected_windows(proto: Protocol) -> int:
+    u = proto.umbrella
+    dense = u.dense_until / u.dense_spacing if u.dense_spacing else 0
+    coarse = max(0.0, u.max_distance - u.dense_until) / u.window_spacing
+    return int(round(dense + coarse)) + 1
+
+
+def cmd_all(args) -> int:
+    for fn in (cmd_prep, cmd_run, cmd_analyze):
+        rc = fn(args)
+        if rc:
+            return rc
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser("cg-us", description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    v = sub.add_parser("validate", help="parse the manifest and check structures")
+    v.add_argument("--manifest", required=True)
+    v.add_argument("--data-root", default=None)
+    v.set_defaults(func=cmd_validate)
+
+    pr = sub.add_parser("prep", help="build the run tree")
+    pr.add_argument("--manifest", required=True)
+    pr.add_argument("--root", required=True)
+    pr.add_argument("--data-root", default=None)
+    pr.add_argument("--protocol", default=None)
+    pr.add_argument("--ff-dir", default=None, help="force-field directory to link into each workdir")
+    pr.add_argument("--replicas", type=int, default=None)
+    pr.add_argument("--backend", choices=["chaperong", "direct"], default=None)
+    pr.add_argument("--system", nargs="*", default=None,
+                    help="rebuild only these manifest entries, leaving finished trees alone")
+    pr.set_defaults(func=cmd_prep)
+
+    r = sub.add_parser("run", help="run the simulations")
+    r.add_argument("--root", required=True)
+    r.add_argument("--system", nargs="*", default=None)
+    r.add_argument("--replica", type=int, default=None)
+    r.add_argument("--backend", choices=["chaperong", "direct"], default=None)
+    r.add_argument("--chaperong", default=None,
+                   help="path to run_CHAPERONg.sh (default: PATH, then $CHAPERONg_PATH)")
+    r.add_argument("--from-stage", type=int, choices=[0, 14], default=None,
+                   help="chaperong backend: force the entry stage "
+                        "(0 = from topology, 14 = resume after steered MD)")
+    r.add_argument("--start", default="topology", help="direct backend: first stage")
+    r.add_argument("--stop", default=None, help="direct backend: last stage")
+    r.add_argument("--force", action="store_true")
+    r.add_argument("--dry-run", action="store_true")
+    r.set_defaults(func=cmd_run)
+
+    x = sub.add_parser("extend", help="lengthen only the windows that are under-sampled")
+    x.add_argument("--root", required=True)
+    x.add_argument("--system", nargs="*", default=None)
+    x.add_argument("--replica", type=int, default=None)
+    x.add_argument("--rounds", type=int, default=3)
+    x.add_argument("--dry-run", action="store_true", help="report the plan, simulate nothing")
+    x.set_defaults(func=cmd_extend)
+
+    b = sub.add_parser("bench", help="measure mdrun throughput and window concurrency")
+    b.add_argument("--root", required=True)
+    b.add_argument("--system", default=None)
+    b.add_argument("--replica", type=int, default=None)
+    b.add_argument("--workdir", default=None, help="benchmark this directory directly")
+    b.add_argument("--steps", type=int, default=10000)
+    b.add_argument("--ntomp", type=int, nargs="*", default=None)
+    b.add_argument("--concurrency", type=int, nargs="*", default=[1, 2, 4])
+    b.add_argument("--windows", type=int, default=None, help="override the window count")
+    b.add_argument("--keep", action="store_true", help="keep the benchmark scratch files")
+    b.set_defaults(func=cmd_bench)
+
+    a = sub.add_parser("analyze", help="WHAM, statistics, figures, report")
+    a.add_argument("--root", required=True)
+    a.add_argument("--no-convergence", action="store_true")
+    a.add_argument("--estimator", choices=["wham", "umbrella_integration", "auto"], default=None,
+                   help="which PMF estimator reports dG (default: the protocol's, normally auto)")
+    a.set_defaults(func=cmd_analyze)
+
+    al = sub.add_parser("all", help="prep + run + analyze")
+    for parser in (al,):
+        parser.add_argument("--manifest", required=True)
+        parser.add_argument("--root", required=True)
+        parser.add_argument("--data-root", default=None)
+        parser.add_argument("--protocol", default=None)
+        parser.add_argument("--ff-dir", default=None)
+        parser.add_argument("--replicas", type=int, default=None)
+        parser.add_argument("--backend", choices=["chaperong", "direct"], default=None)
+        parser.add_argument("--chaperong", default=None)
+        parser.add_argument("--system", nargs="*", default=None)
+        parser.add_argument("--replica", type=int, default=None)
+        parser.add_argument("--from-stage", type=int, choices=[0, 14], default=None)
+        parser.add_argument("--start", default="topology")
+        parser.add_argument("--stop", default=None)
+        parser.add_argument("--force", action="store_true")
+        parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument("--no-convergence", action="store_true")
+    al.set_defaults(func=cmd_all)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

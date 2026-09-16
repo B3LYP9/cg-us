@@ -1,0 +1,94 @@
+replicas: 3
+seed_base: 20181
+temperature: 310.0
+
+prep:
+  force_field: charmm36-jul2022
+  water: tip3p
+  ff_in_workdir: true
+  ignh: true
+  heavy_hydrogens: false      # pdb2gmx -heavyh: no lower-mass guard, leaves CH3 carbons at 2.9 amu
+  mass_repartition_factor: 3  # the validated route to 4 fs; gmx errors if any bound atom drops below
+  ph: 7.4
+  cyclic_sb: 0.05        # nm; pdb2gmx closes a backbone ring when
+  cyclic_lb: 0.4         # nm; cyclic_sb < d(N_first, C_last) < cyclic_lb
+  cyclic_lb_conservative: 0.25
+  cyclic_lb_from_manifest: true
+  box_edge_xy: 1.2     # nm per side -> 2.4 nm between periodic images, which is
+                       # 2*rvdw; at 1.0 the big ectodomain binders saw themselves
+  box_edge_z: 1.0
+  em_fmax_max: 5000    # kJ/mol/nm; EM above this aborts the run instead of
+                       # handing a broken topology to the GPU
+  pull_pbcatom: true   # name a spatially central reference atom per pull group
+  constraints: all-bonds  # h-bonds leaves the carboxylate C=O free: 22 fs period against
+                          # a 4 fs step is five steps per oscillation, and a window
+                          # integrates into a nan every few hundred windows
+  pull_box_margin: 0.04  # relative slack over the 0.49*box pull limit (NPT shrinkage)
+  pull_headroom: 0.5     # nm: drift of d0 during equilibration + window fluctuation
+  ion_conc: 0.15
+  pname: NA
+  nname: CL
+
+smd:
+  rate: 0.001            # nm/ps; slow pulling gives far better window starting points
+  k: 1000.0              # kJ/mol/nm^2
+  time_ns: 2.0           # 2 ns at 0.001 nm/ps -> 2.0 nm of pulling
+  dt: 0.004
+  restrain_target: true  # backbone-only posre on the target, biased stages only
+
+umbrella:
+  dense_spacing: 0.1     # nm, used while xi < dense_until (steep part of the PMF)
+  dense_until: 1.0       # nm past the bound-state minimum
+  window_spacing: 0.2    # nm in the flat tail
+  k: 1000.0
+  time_ns: 3.0           # base pass; under-sampled windows are grown by cg-us extend
+  extend_ns: 3.0         # chunk added per extension round
+  max_ns: 24.0           # per-window ceiling
+  min_neff: 50.0         # effective samples below which a window is extended
+  max_drift_sd: 0.5      # mean of xi may drift this many sd between halves
+  equil_ns: 0.5
+  discard_ns: 0.5        # dropped from the head of every window before WHAM
+  max_distance: 2.0
+  dt: 0.004              # needs prep.heavy_hydrogens
+  barostat: C-rescale    # correct NPT sampling and friendly to -update gpu
+
+wham:
+  bootstraps: 200
+  method: b-hist
+  unit: kCal
+  bins: 200
+  tolerance: 1.0e-6
+  temperature: null      # defaults to the simulation temperature
+
+run:
+  backend: chaperong     # chaperong | direct
+  gmx: gmx
+  chaperong: run_CHAPERONg.sh
+  ntomp: 8               # OpenMP threads per mdrun; 0 = use every core
+  ntmpi: 1
+  cpu_cores: 0           # 0 = autodetect; the budget shared by window_workers
+  pin_threads: true      # pin each concurrent window to its own core range
+  gpu: true
+  gpu_id: ""
+  gpu_pme: true          # PME on the GPU; without it the GPU waits on the CPU
+  gpu_bonded: true
+  gpu_update: true       # GPU-resident mode, the big win for small windows
+  nstlist: 100
+  maxwarn: 2
+  timeout_s: 172800
+  window_workers: 1      # direct backend: windows sharing one GPU
+  skip_movie: false      # true bypasses the PyMOL movie at stage 13
+  movie_frames: 0        # 0 = CHAPERONg default (200-300); lower = much faster
+  pymol_headless: true
+
+analysis:
+  plateau_width: 0.4     # nm of the PMF tail averaged as the unbound reference
+  overlap_min: 0.03
+  jacobian_correction: false
+  exclude_roles: ["negative_control"]
+  control_threshold: -5.0
+  reference_temperature: 298.15
+  estimator: auto           # wham | umbrella_integration | auto. auto = WHAM everywhere the
+                            # window ladder is connected, umbrella integration across a break,
+                            # but only after the two agreed where WHAM is sound
+  estimator_tolerance: 1.0  # kcal/mol rms between the two profiles on the connected stretch
