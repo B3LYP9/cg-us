@@ -1,6 +1,6 @@
 """cg-us: umbrella-sampling wrapper around CHAPERONg for protein-peptide complexes."""
 
-__version__ = "0.12.2"
+__version__ = "0.13.1"
 
 from .config import Protocol
 from .manifest import Entry, read_manifest

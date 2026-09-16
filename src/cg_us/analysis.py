@@ -74,11 +74,18 @@ def analyse_replica(workdir: str | Path, entry: Entry, proto: Protocol, replica:
     usable = [d for d in diag if d.get("usable")]
     pd.DataFrame(diag).to_csv(workdir / "analysis" / "window_diagnostics.csv", index=False)
 
+    chosen_pmf = (W.PMF(force.xi, force.energy, force.error)
+                  if source == "umbrella_integration" else pmf)
+    span = W.depth_over_span(chosen_pmf, proto.analysis.common_span_nm,
+                             jacobian=proto.analysis.jacobian_correction, kT=proto.kT_kcal)
+
     record = {
         "system": entry.name,
         "replica": replica,
         "workdir": str(workdir),
         **dg,
+        "xi_connected_nm": round(float(xi_connected), 3) if xi_connected is not None else None,
+        **span,
         "dG_source": source,
         "dG_wham": wham_dg["dG"],
         "dG_umbrella_integration": ui_dg["dG"] if ui_dg else None,
@@ -103,6 +110,8 @@ def analyse_replica(workdir: str | Path, entry: Entry, proto: Protocol, replica:
     }
     if do_convergence:
         record["convergence"] = W.convergence(workdir, proto, xi_max=xi_connected)
+        record["convergence_ui"] = _ui_convergence(workdir, proto)
+        record["ui_block_drift"] = UI.block_drift(record["convergence_ui"])
 
     record["window_diagnostics"] = diag
     detail = {"pmf": {"xi": pmf.xi, "energy": pmf.energy, "error": pmf.error},
@@ -113,6 +122,23 @@ def analyse_replica(workdir: str | Path, entry: Entry, proto: Protocol, replica:
              hist_centers=centers, hist=hist,
              ui_xi=force.xi, ui_energy=force.energy, ui_error=force.error)
     return record | {"_detail": detail}
+
+
+def _ui_convergence(workdir: Path, proto: Protocol) -> list[dict]:
+    """Convergence from the mean force, which needs no ladder and no gmx call.
+
+    Reported for every replica, including the ones whose WHAM blocks return
+    nothing because the ladder is broken - those are exactly the replicas whose
+    convergence matters most.
+    """
+    def score(prof):
+        return W.binding_free_energy(W.PMF(prof.xi, prof.energy, prof.error),
+                                     proto.analysis.plateau_width,
+                                     jacobian=proto.analysis.jacobian_correction,
+                                     kT=proto.kT_kcal)
+    return UI.convergence_blocks(workdir, proto.umbrella.discard_ns * 1000, None,
+                                 proto.analysis.convergence_blocks, score,
+                                 k=proto.umbrella.k)
 
 
 def smd_metrics(workdir: str | Path) -> dict:
@@ -242,6 +268,13 @@ def quality_flags(records: list[dict], proto: Protocol) -> list[str]:
         drift = r.get("convergence", {}).get("half_split_drift")
         if drift is not None and drift > 1.0:
             flags.append(f"{tag}: first/second-half dG differ by {drift:.2f} kcal/mol")
+        slope = (r.get("ui_block_drift") or {}).get("slope_kcal_per_ns")
+        if slope is not None and abs(slope) > 0.25:
+            flags.append(f"{tag}: dG still moving at {slope:+.2f} kcal/mol per ns over the "
+                         "second half of the sampling - the estimate is not converged")
+        if r.get("span_complete") is False:
+            flags.append(f"{tag}: the ladder does not reach {a.common_span_nm} nm past the "
+                         "minimum, so dG_span is not comparable with the other systems")
         span = r["xi_range_nm"][1] - r["xi_range_nm"][0]
         if span < proto.umbrella.max_distance * 0.8:
             flags.append(f"{tag}: reaction coordinate spans only {span:.2f} nm")
@@ -255,6 +288,8 @@ def replica_table(records: list[dict]) -> pd.DataFrame:
             "system": r["system"],
             "replica": r["replica"],
             "dG_kcal": r["dG"],
+            "dG_span_kcal": r.get("dG_span"),
+            "span_complete": r.get("span_complete"),
             "bootstrap_err": r["dG_bootstrap_error"],
             "bound_xi_nm": r["bound_xi_nm"],
             "barrier_kcal": r["unbinding_barrier"],
@@ -271,6 +306,8 @@ def replica_table(records: list[dict]) -> pd.DataFrame:
             "no_estimate_reason": r.get("no_estimate_reason"),
             "plateau_roughness": r["plateau_roughness"],
             "half_split_drift": r.get("convergence", {}).get("half_split_drift"),
+            "ui_drift_kcal": (r.get("ui_block_drift") or {}).get("drift_kcal"),
+            "ui_drift_per_ns": (r.get("ui_block_drift") or {}).get("slope_kcal_per_ns"),
             "sampled_ns": r.get("sampled_ns"),
             "n_eff_min": r.get("n_eff_min"),
             "under_sampled": r.get("windows_under_sampled"),

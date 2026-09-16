@@ -110,6 +110,8 @@ class Analysis:
     reference_temperature: float = 298.15
     estimator: str = "auto"          # wham | umbrella_integration | auto
     estimator_tolerance: float = 1.0  # kcal/mol RMS between the two, before UI is trusted
+    common_span_nm: float = 1.5       # depth over a fixed distance, comparable across ladders
+    convergence_blocks: int = 4
 
 
 @dataclass

@@ -68,8 +68,13 @@ def reference_from_mdp(path: str | Path) -> float | None:
 
 
 def window_force(pullf: str | Path, pullx: str | Path, window: int,
-                 discard_ps: float = 0.0, xi_ref: float | None = None) -> WindowForce | None:
+                 discard_ps: float = 0.0, xi_ref: float | None = None,
+                 end_ps: float | None = None) -> WindowForce | None:
     """Mean force and its uncertainty for one window.
+
+    `discard_ps` and `end_ps` are both measured from the first frame of the
+    window, so a block analysis asks for the same slice of wall-clock sampling
+    in every window regardless of when each one happened to be written.
 
     The umbrella makes f an exact linear function of xi, so regressing one on
     the other recovers both the force constant and the reference position from
@@ -87,6 +92,8 @@ def window_force(pullf: str | Path, pullx: str | Path, window: int,
     n = min(len(fdata), len(xdata))
     t, f, xi = fdata[:n, 0], fdata[:n, 1], xdata[:n, 1]
     keep = t >= (t[0] + discard_ps)
+    if end_ps is not None:
+        keep &= t <= (t[0] + end_ps)
     f, xi = f[keep], xi[keep]
     if len(f) < 16 or np.ptp(xi) <= 0:
         return None
@@ -153,7 +160,8 @@ def integrate(windows: list[WindowForce], points: int = 400) -> ForceProfile:
 
 
 def profile_from_windows(workdir: str | Path, discard_ps: float, k: float | None = None,
-                         listing: str = "pullx_files.dat") -> ForceProfile:
+                         listing: str = "pullx_files.dat",
+                         end_ps: float | None = None) -> ForceProfile:
     """`k` is only compared against the constant recovered from the data."""
     workdir = Path(workdir)
     names = _window_files(workdir, listing)
@@ -164,7 +172,7 @@ def profile_from_windows(workdir: str | Path, discard_ps: float, k: float | None
             continue
         tag = pullx.name.replace("umbrella_", "").replace("_pullx.xvg", "")
         ref = reference_from_mdp(workdir / f"md_umbrella_{tag}.mdp")
-        w = window_force(pullf, pullx, i, discard_ps=discard_ps, xi_ref=ref)
+        w = window_force(pullf, pullx, i, discard_ps=discard_ps, xi_ref=ref, end_ps=end_ps)
         if w is not None:
             forces.append(w)
     return integrate(forces)
@@ -225,4 +233,76 @@ def summarise(ui: ForceProfile) -> dict:
         "ref_residual_max_nm": (round(max(abs(w.ref_residual) for w in ui.windows
                                           if w.ref_residual is not None), 4)
                                 if any(w.ref_residual is not None for w in ui.windows) else None),
+    }
+
+
+def window_span_ps(workdir: str | Path, listing: str = "pullx_files.dat") -> float | None:
+    """How much sampling the shortest window actually holds.
+
+    `extend` lengthens windows past the protocol's time_ns, so the block
+    analysis has to ask the files rather than the configuration; otherwise an
+    extended run is scored on its first few nanoseconds and looks unchanged.
+    """
+    spans = []
+    for pullx in _window_files(Path(workdir), listing):
+        if not pullx.exists():
+            continue
+        d, _ = read_xvg(pullx)
+        if d.size:
+            spans.append(float(d[-1, 0] - d[0, 0]))
+    return min(spans) if spans else None
+
+
+def convergence_blocks(workdir: str | Path, discard_ps: float, total_ps: float | None,
+                       n_blocks: int, score, k: float | None = None) -> list[dict]:
+    """dG against the amount of umbrella data used, from the mean force alone.
+
+    The WHAM version of this test re-runs gmx wham once per block and then
+    applies the connected-range cut, so on a ladder with even one broken pair
+    every block reports nothing and the drift is silently unavailable - which
+    is what left 89 of 96 replicas in the first campaign with no convergence
+    evidence at all. The force-based profile needs no ladder and no external
+    call: a block is just a shorter slice of pullf/pullx, so the whole curve
+    comes out of files that are already on disk.
+
+    `score` turns a ForceProfile into the reported dict.
+    """
+    if total_ps is None:
+        total_ps = window_span_ps(workdir)
+    if total_ps is None:
+        return []
+    usable = total_ps - discard_ps
+    if usable <= 0 or n_blocks < 1:
+        return []
+    out = []
+    for i in range(1, n_blocks + 1):
+        end = discard_ps + usable * i / n_blocks
+        prof = profile_from_windows(workdir, discard_ps, k=k, end_ps=end)
+        res = score(prof) if prof.xi.size else {"dG": None}
+        out.append({"used_ns": round((end - discard_ps) / 1000, 2),
+                    "dG": res.get("dG"),
+                    "n_eff_min": (round(min(w.n_eff for w in prof.windows), 1)
+                                  if prof.windows else None)})
+    return out
+
+
+def block_drift(blocks: list[dict]) -> dict:
+    """How much the estimate is still moving over the last half of the data.
+
+    A profile that has stopped changing gives a flat tail; one that is still
+    walking has not converged, whatever its error bar says. The slope is
+    reported per nanosecond so it can be compared across runs of different
+    length.
+    """
+    pts = [(b["used_ns"], b["dG"]) for b in blocks if b.get("dG") is not None]
+    if len(pts) < 3:
+        return {"drift_kcal": None, "slope_kcal_per_ns": None, "n_points": len(pts)}
+    t = np.array([p[0] for p in pts])
+    g = np.array([p[1] for p in pts])
+    half = t >= t.max() / 2
+    slope = float(np.polyfit(t[half], g[half], 1)[0]) if half.sum() >= 2 else None
+    return {
+        "drift_kcal": round(float(g[-1] - g[0]), 3),
+        "slope_kcal_per_ns": round(slope, 3) if slope is not None else None,
+        "n_points": len(pts),
     }

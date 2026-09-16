@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cg-us"
-version = "0.12.2"
+version = "0.13.1"
 description = "Umbrella-sampling wrapper around CHAPERONg for protein-peptide binding free energies"
 readme = "README.md"
 requires-python = ">=3.10"

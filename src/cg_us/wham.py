@@ -190,6 +190,41 @@ def _no_estimate(full_range: list[float], plateau_width: float, jacobian: bool,
     }
 
 
+def depth_over_span(pmf: PMF, span_nm: float, jacobian: bool = False,
+                    kT: float | None = None) -> dict:
+    """Well depth measured over a fixed distance, not over whatever the ladder covered.
+
+    The plateau estimate answers "how deep is the well" only if the ladder
+    actually reached the plateau, and it silently answers "how far did you
+    pull" if it did not. That makes two runs with different window counts
+    incomparable: the first campaign put its benchmarks on a 26-window ladder
+    and its designs on a 22-window one, and the resulting 3x difference in
+    depth was read as a correlation with affinity. Integrating the same
+    `span_nm` past the minimum in every system removes that confound. It is a
+    comparability metric, not a binding free energy: a span shorter than the
+    interaction range truncates a real well.
+    """
+    xi, g = pmf.xi, pmf.energy.copy()
+    if jacobian and kT:
+        g = g + 2.0 * kT * np.log(np.maximum(xi, 1e-6))
+    if xi.size < 5:
+        return {"dG_span": None, "span_nm": span_nm, "span_complete": False}
+
+    bound_i = int(np.argmin(g))
+    target = xi[bound_i] + span_nm
+    complete = bool(target <= xi.max())
+    hi = min(target, float(xi.max()))
+    tail = (xi >= hi - 0.1) & (xi <= hi)
+    if tail.sum() < 2:
+        tail = xi >= xi.max() - 0.1
+    return {
+        "dG_span": round(float(g[bound_i] - float(np.mean(g[tail]))), 3),
+        "span_nm": round(span_nm, 3),
+        "span_reached_nm": round(float(hi - xi[bound_i]), 3),
+        "span_complete": complete,
+    }
+
+
 def histogram_overlap(centers: np.ndarray, hist: np.ndarray) -> dict:
     """Overlap coefficient between neighbouring windows, ordered by mean position."""
     if hist.size == 0:
