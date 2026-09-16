@@ -85,10 +85,12 @@ wham:
   temperature: null      # defaults to the simulation temperature
 
 run:
-  backend: chaperong     # chaperong | direct
+  backend: direct        # chaperong | direct; direct is what actually uses
+                         # window_workers below - chaperong runs one window at a
+                         # time and left this 56-core / 1-GPU box mostly idle
   gmx: gmx
   chaperong: run_CHAPERONg.sh
-  ntomp: 8               # OpenMP threads per mdrun; 0 = use every core
+  ntomp: 18              # OpenMP threads per mdrun; 3 workers x 18 = 54 of 56 cores
   ntmpi: 1
   cpu_cores: 0           # 0 = autodetect; the budget shared by window_workers
   pin_threads: true      # pin each concurrent window to its own core range
@@ -100,7 +102,9 @@ run:
   nstlist: 100
   maxwarn: 2
   timeout_s: 172800
-  window_workers: 1      # direct backend: windows sharing one GPU
+  window_workers: 3      # windows sharing the one GPU; 7 workers bought only
+                         # ~15% aggregate throughput and stretched a 5 ns window
+                         # from 10 min to an hour - 3 is the measured sweet spot
   skip_movie: false      # true bypasses the PyMOL movie at stage 13
   movie_frames: 0        # 0 = CHAPERONg default (200-300); lower = much faster
   pymol_headless: true
