@@ -225,6 +225,7 @@ def _protocol_dict(proto: Protocol) -> dict:
 
 def cmd_extend(args) -> int:
     from . import convergence as C
+    from . import windows as win
 
     root = Path(args.root)
     proto = _protocol(root)
@@ -240,6 +241,28 @@ def cmd_extend(args) -> int:
                 continue
             wd = prep.replica_dir(root, e, rep)
             if not (wd / "tpr_files.dat").exists():
+                continue
+
+            if args.fill_gaps:
+                result_path = wd / "analysis" / "replica_result.json"
+                if not result_path.exists():
+                    print(f"[extend] {e.name} rep{rep}: no analysis yet - "
+                          "run `cg-us analyze` first, skipping --fill-gaps")
+                    continue
+                detail = json.loads(result_path.read_text())["detail_overlap"]
+                gaps = win.find_gaps(detail.get("overlaps") or [],
+                                     detail.get("window_centers_nm") or [],
+                                     u.overlap_min)
+                print(f"[extend] {e.name} rep{rep}: {len(gaps)} gap(s) below overlap {u.overlap_min}")
+                for g in gaps:
+                    print(f"          {g['before_nm']:.3f}-{g['after_nm']:.3f} nm "
+                          f"(overlap {g['overlap']:.4f}) -> candidate window near "
+                          f"{g['target_distance']:.3f} nm")
+                if gaps and not args.dry_run:
+                    ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
+                    added = direct_backend.fill_gaps(ctx)
+                    print(f"          added {len(added)} window(s); re-run `cg-us analyze` "
+                          "to see the effect")
                 continue
 
             for round_no in range(1, args.rounds + 1):
@@ -369,6 +392,10 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--replica", type=int, default=None)
     x.add_argument("--rounds", type=int, default=3)
     x.add_argument("--dry-run", action="store_true", help="report the plan, simulate nothing")
+    x.add_argument("--fill-gaps", action="store_true",
+                   help="instead of lengthening windows, add one window (from an existing "
+                        "SMD frame) between each adjacent pair whose histogram overlap is "
+                        "below analysis.overlap_min - needs `cg-us analyze` to have run first")
     x.set_defaults(func=cmd_extend)
 
     b = sub.add_parser("bench", help="measure mdrun throughput and window concurrency")

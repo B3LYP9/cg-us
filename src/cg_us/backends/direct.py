@@ -248,6 +248,86 @@ def extend_windows(ctx: RunContext, plan: list[dict]) -> list[dict]:
             return list(pool.map(one, plan))
 
 
+def fill_gaps(ctx: RunContext, threshold: float | None = None,
+             max_new: int | None = None) -> list[dict]:
+    """Add one window per near-zero-overlap adjacent pair.
+
+    A broken pair (no shared samples between neighbouring histograms) leaves
+    the offset WHAM would fix from them unconstrained, and no amount of
+    additional sampling in either neighbour manufactures a configuration the
+    other one would have visited - that needs a window physically between
+    them. The steered-MD trajectory already has one: `_frames`/`_distances`
+    wrote every frame cg-us did not pick for the original ladder, so filling
+    a gap costs one more mdrun, not a new pull.
+
+    Requires `cg-us analyze` to have already run for this replica (reads its
+    histogram overlap from `analysis/replica_result.json`); run it again
+    afterwards to see whether the gap is gone.
+    """
+    wd = ctx.workdir
+    result_path = wd / "analysis" / "replica_result.json"
+    if not result_path.exists():
+        raise GmxError(
+            f"{wd}: no analysis/replica_result.json - run `cg-us analyze` for this "
+            "replica before filling gaps, so there is a histogram overlap to fill them from"
+        )
+    detail = json.loads(result_path.read_text())["detail_overlap"]
+    overlaps, centers = detail.get("overlaps") or [], detail.get("window_centers_nm") or []
+    threshold = ctx.proto.analysis.overlap_min if threshold is None else threshold
+    gaps = win.find_gaps(overlaps, centers, threshold)
+    if not gaps:
+        return []
+    max_new = ctx.proto.run.gap_fill_max_new if max_new is None else max_new
+    if max_new is not None and max_new >= 0:
+        gaps = sorted(gaps, key=lambda g: g["overlap"])[:max_new]
+
+    frames, dists = win.read_distance_summary(wd / "distances_summary.txt")
+    windows_json = json.loads((wd / "windows.json").read_text())
+    existing = windows_json["windows"]
+    used = {w["frame"] for w in existing}
+    picked = win.select_gap_frames(frames, dists, gaps, used)
+    if not picked:
+        return []
+
+    next_idx = max(w["window"] for w in existing) + 1
+    new_windows = [{"window": next_idx + i, **p} for i, p in enumerate(picked)]
+
+    # window_targets() (used to pin each window's reference) reads this file,
+    # so the new entries must land here before _run_window is called.
+    windows_json["windows"] = existing + new_windows
+    (wd / "windows.json").write_text(json.dumps(windows_json, indent=2))
+
+    workers = max(1, ctx.proto.run.window_workers)
+    with _slots(workers) as take:
+        def one(w: dict) -> dict:
+            with take() as slot:
+                r = _guarded_window(ctx, {"window": w["window"], "frame": w["frame"]}, slot, workers)
+                return r if "error" in r else {**r, "gap_before_nm": w["gap_before_nm"],
+                                               "gap_after_nm": w["gap_after_nm"],
+                                               "gap_overlap": w["gap_overlap"]}
+
+        if workers == 1:
+            results = [one(w) for w in new_windows]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(one, new_windows))
+
+    failed = [r for r in results if "error" in r]
+    records = [r for r in results if "error" not in r]
+    if failed:
+        _report_failures(ctx, failed)
+
+    old_records = json.loads((wd / "window_records.json").read_text())
+    write_window_lists(wd, old_records + records)
+    (wd / "window_records.json").write_text(json.dumps(old_records + records, indent=2))
+
+    for r in records:
+        print(f"      +window {r['window']} (frame {r['frame']}) between "
+              f"{r['gap_before_nm']:.3f} and {r['gap_after_nm']:.3f} nm "
+              f"(overlap was {r['gap_overlap']:.4f})")
+    return records
+
+
 def _guarded_window(ctx: RunContext, w: dict, slot: int, workers: int) -> dict:
     """Run one window, and do not let its blow-up take the other 21 with it.
 

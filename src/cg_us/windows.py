@@ -24,6 +24,14 @@ def write_distance_summary(path: str | Path, frames: np.ndarray, dists: np.ndarr
     Path(path).write_text("\n".join(f"{int(f)}\t{d:.4f}" for f, d in zip(frames, dists)) + "\n")
 
 
+def _nearest_unused(frames: np.ndarray, dists: np.ndarray, target: float,
+                    used: set[int]) -> int | None:
+    """Index into `frames`/`dists` of the frame closest to `target`, skipping
+    any frame number already in `used`. None if every frame is taken."""
+    order = np.argsort(np.abs(dists - target))
+    return next((i for i in order if int(frames[i]) not in used), None)
+
+
 def select_windows(frames: np.ndarray, dists: np.ndarray, spacing: float,
                    max_distance: float, dense_until: float | None = None,
                    dense_spacing: float | None = None) -> list[dict]:
@@ -46,8 +54,7 @@ def select_windows(frames: np.ndarray, dists: np.ndarray, spacing: float,
     used: set[int] = set()
     windows: list[dict] = []
     for target in grid:
-        order = np.argsort(np.abs(dists - target))
-        pick = next((i for i in order if int(frames[i]) not in used), None)
+        pick = _nearest_unused(frames, dists, target, used)
         if pick is None:
             continue
         used.add(int(frames[pick]))
@@ -91,3 +98,57 @@ def spacing_report(windows: list[dict]) -> dict:
         "max_spacing_nm": round(float(gaps.max()), 4) if len(gaps) else None,
         "n_gaps_above_2x": int((gaps > 2 * np.median(gaps)).sum()) if len(gaps) else 0,
     }
+
+
+def find_gaps(overlaps: list[float], centers_nm: list[float], threshold: float) -> list[dict]:
+    """Adjacent window pairs whose histogram overlap is below `threshold`.
+
+    WHAM fixes the offset between two windows from the samples they share; a
+    pair with (near) no shared samples leaves that offset unconstrained no
+    matter how long either window runs, because a longer run of window i or
+    i+1 does not manufacture a configuration the other one would have
+    visited. The fix is a window physically between them, not more time in
+    either - which is exactly what `extend` cannot do and this can.
+
+    `centers_nm` is `len(overlaps) + 1` long (one center per window, ordered by
+    empirical mean position, as `wham.histogram_overlap` returns it).
+    """
+    if len(centers_nm) != len(overlaps) + 1:
+        raise ValueError("centers_nm must have one more entry than overlaps")
+    return [
+        {
+            "before_nm": round(centers_nm[i], 4),
+            "after_nm": round(centers_nm[i + 1], 4),
+            "target_distance": round((centers_nm[i] + centers_nm[i + 1]) / 2, 4),
+            "overlap": overlaps[i],
+        }
+        for i in range(len(overlaps))
+        if overlaps[i] < threshold
+    ]
+
+
+def select_gap_frames(frames: np.ndarray, dists: np.ndarray, gaps: list[dict],
+                      used: set[int]) -> list[dict]:
+    """One nearest not-yet-used SMD frame per gap midpoint.
+
+    `used` should already contain every frame a window (old or new) has
+    claimed; frames are never reused, including across the gaps in one call.
+    """
+    used = set(used)
+    picked: list[dict] = []
+    for gap in gaps:
+        target = gap["target_distance"]
+        pick = _nearest_unused(frames, dists, target, used)
+        if pick is None:
+            continue
+        used.add(int(frames[pick]))
+        picked.append({
+            "frame": int(frames[pick]),
+            "target_distance": target,
+            "distance": round(float(dists[pick]), 4),
+            "deviation": round(float(dists[pick] - target), 4),
+            "gap_before_nm": gap["before_nm"],
+            "gap_after_nm": gap["after_nm"],
+            "gap_overlap": gap["overlap"],
+        })
+    return picked

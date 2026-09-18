@@ -163,6 +163,51 @@ def test_window_selection_is_monotonic_and_unique():
     assert rep["n_windows"] == len(picked)
 
 
+def test_find_gaps_flags_only_pairs_below_threshold():
+    # 5 windows -> 4 neighbour pairs; only the middle one is broken.
+    overlaps = [0.15, 0.20, 0.0008, 0.12]
+    centers = [0.5, 0.9, 1.3, 1.7, 2.1]
+    gaps = windows.find_gaps(overlaps, centers, threshold=0.03)
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g["before_nm"] == 1.3
+    assert g["after_nm"] == 1.7
+    assert g["target_distance"] == pytest.approx(1.5)
+    assert g["overlap"] == 0.0008
+
+
+def test_find_gaps_rejects_mismatched_lengths():
+    with pytest.raises(ValueError, match="one more entry"):
+        windows.find_gaps([0.1, 0.1], [0.5, 0.9], threshold=0.03)
+
+
+def test_select_gap_frames_picks_nearest_unused_frame_per_gap():
+    frames = np.arange(20)
+    dists = np.linspace(0.5, 2.5, 20)  # 0.5, 0.605, 0.711, ...
+    gaps = [
+        {"before_nm": 0.9, "after_nm": 1.3, "target_distance": 1.1, "overlap": 0.001},
+        {"before_nm": 1.9, "after_nm": 2.3, "target_distance": 2.1, "overlap": 0.0005},
+    ]
+    picked = windows.select_gap_frames(frames, dists, gaps, used=set())
+    assert len(picked) == 2
+    for p, gap in zip(picked, gaps):
+        assert abs(p["distance"] - gap["target_distance"]) <= (dists[1] - dists[0])
+        assert p["gap_before_nm"] == gap["before_nm"]
+        assert p["gap_overlap"] == gap["overlap"]
+    assert picked[0]["frame"] != picked[1]["frame"]
+
+
+def test_select_gap_frames_skips_frames_already_used():
+    frames = np.array([0, 1, 2])
+    dists = np.array([1.0, 1.05, 1.1])
+    gap = {"before_nm": 0.9, "after_nm": 1.2, "target_distance": 1.0, "overlap": 0.0}
+    picked = windows.select_gap_frames(frames, dists, [gap], used={0})
+    assert picked[0]["frame"] == 1  # frame 0 is the exact match but already used
+
+    picked_none = windows.select_gap_frames(frames, dists, [gap], used={0, 1, 2})
+    assert picked_none == []
+
+
 def _atoms(n, start_res=1):
     names = ["N", "CA", "C", "O", "HA"]
     return "\n".join(
@@ -999,6 +1044,85 @@ def test_window_failure_is_isolated_and_retried(monkeypatch, tmp_path):
     ctx.proto.run.window_retries = 0
     bad = direct._guarded_window(ctx, {"window": 3, "frame": 918}, 0, 1)
     assert "nan" in bad["error"]
+
+
+def test_fill_gaps_adds_one_window_per_broken_pair(monkeypatch, tmp_path):
+    from cg_us.backends import direct
+
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "analysis" / "replica_result.json").write_text(json.dumps({
+        "detail_overlap": {
+            "overlaps": [0.15, 0.0008, 0.12],
+            "window_centers_nm": [0.5, 0.9, 1.3, 1.7],
+        }
+    }))
+    frames = np.arange(50)
+    dists = 0.5 + np.linspace(0, 1.5, 50)
+    windows.write_distance_summary(tmp_path / "distances_summary.txt", frames, dists)
+    existing = [
+        {"window": 0, "frame": 0, "target_distance": 0.5, "distance": 0.5},
+        {"window": 1, "frame": 13, "target_distance": 0.9, "distance": 0.9},
+        {"window": 2, "frame": 26, "target_distance": 1.3, "distance": 1.3},
+        {"window": 3, "frame": 40, "target_distance": 1.7, "distance": 1.7},
+    ]
+    (tmp_path / "windows.json").write_text(json.dumps({"windows": existing}))
+    old_records = [{"window": w["window"], "frame": w["frame"],
+                    "tpr": f"umbrella_win{w['window']}.tpr",
+                    "pullf": f"umbrella_win{w['window']}_pullf.xvg",
+                    "pullx": f"umbrella_win{w['window']}_pullx.xvg"} for w in existing]
+    (tmp_path / "window_records.json").write_text(json.dumps(old_records))
+
+    calls = []
+
+    def fake_run_window(ctx, window, frame, slot=0, workers=1, retry=0, dt_scale=1.0):
+        calls.append((window, frame))
+        return {"window": window, "frame": frame,
+                "tpr": f"umbrella_win{window}.tpr",
+                "pullf": f"umbrella_win{window}_pullf.xvg",
+                "pullx": f"umbrella_win{window}_pullx.xvg"}
+
+    monkeypatch.setattr(direct, "_run_window", fake_run_window)
+    ctx = _fake_ctx(tmp_path)
+    added = direct.fill_gaps(ctx)
+
+    assert len(added) == 1
+    assert added[0]["window"] == 4  # next free index after 0-3
+    assert calls == [(4, added[0]["frame"])]
+    assert added[0]["gap_before_nm"] == 0.9
+    assert added[0]["gap_after_nm"] == 1.3
+    # the new window's target sits at the gap midpoint
+    new_entry = json.loads((tmp_path / "windows.json").read_text())["windows"][-1]
+    assert new_entry["target_distance"] == pytest.approx(1.1)
+    # file lists and window_records.json now include the new window too
+    records = json.loads((tmp_path / "window_records.json").read_text())
+    assert len(records) == 5
+    assert (tmp_path / "tpr_files.dat").read_text().count("\n") == 5
+    assert f"umbrella_win4.tpr" in (tmp_path / "tpr_files.dat").read_text()
+
+    # a second call, unchanged analysis, is idempotent about which frame it
+    # would reuse - the previously-picked frame must not be picked again
+    added2 = direct.fill_gaps(ctx)
+    if added2:
+        assert added2[0]["frame"] != added[0]["frame"]
+
+
+def test_fill_gaps_requires_analysis_first(tmp_path):
+    from cg_us.backends import direct
+    from cg_us.backends.base import GmxError
+    ctx = _fake_ctx(tmp_path)
+    with pytest.raises(GmxError, match="cg-us analyze"):
+        direct.fill_gaps(ctx)
+
+
+def test_fill_gaps_returns_nothing_below_threshold(monkeypatch, tmp_path):
+    from cg_us.backends import direct
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "analysis" / "replica_result.json").write_text(json.dumps({
+        "detail_overlap": {"overlaps": [0.15, 0.12], "window_centers_nm": [0.5, 0.9, 1.3]}
+    }))
+    monkeypatch.setattr(direct, "_run_window", lambda *a, **k: pytest.fail("should not run"))
+    ctx = _fake_ctx(tmp_path)
+    assert direct.fill_gaps(ctx) == []
 
 
 def test_retry_mdp_halves_the_step_and_reseeds(tmp_path):

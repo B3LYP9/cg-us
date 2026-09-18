@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.15.0 — gap-filling windows
+
+`cg-us extend` only ever bought a window more time; a neighbouring pair with
+(near) zero histogram overlap stays broken no matter how long either one
+runs, because a longer run of window i or i+1 does not manufacture a
+configuration the other one would have visited. That is what put isolated
+zero-overlap pairs, and the `windows_connected` << `n_windows` fallback to
+umbrella_integration, into nearly every replica of both the ActRIIB benchmark
+and the first GDF8 multi-chain runs.
+
+### Added
+
+* `windows.find_gaps` — adjacent window pairs (ordered by empirical mean
+  position, as `wham.histogram_overlap` already computes them) whose overlap
+  falls below a threshold, each reported with the midpoint distance a new
+  window should target.
+* `windows.select_gap_frames` — one not-yet-used SMD frame per gap midpoint,
+  drawn from the same `distances_summary.txt` the original ladder was built
+  from (`_frames`/`_distances` already wrote every frame cg-us did not pick;
+  filling a gap costs one more mdrun, not a new pull).
+* `backends.direct.fill_gaps` — runs those new windows (reusing `_run_window`,
+  so retries/pinning/GPU-resident handling are identical to any other
+  window), appends them to `windows.json`, `window_records.json` and the
+  `tpr_files.dat`/`pullf_files.dat`/`pullx_files.dat` WHAM reads, without
+  touching the existing windows. Requires `cg-us analyze` to have already run
+  for that replica, since the gaps come from its histogram overlap.
+* `cg-us extend --fill-gaps`: reports the gaps below `analysis.overlap_min`
+  for each replica and, unless `--dry-run`, fills up to `run.gap_fill_max_new`
+  of them (worst overlap first). Re-run `cg-us analyze` afterwards to see
+  whether the gap is gone.
+
+### Compatibility
+
+`extend` without `--fill-gaps` is unchanged. New windows get fresh indices
+appended after the existing ones; WHAM and the overlap/connectivity analysis
+already sort by empirical position rather than input order, so nothing
+downstream needs to know a window was inserted rather than planned upfront.
+
 ## 0.14.0 — multi-chain pull groups
 
 Before this version `target` and `binder` in the manifest were single chains

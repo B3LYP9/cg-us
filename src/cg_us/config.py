@@ -95,6 +95,7 @@ class Run:
     window_retries: int = 1
     retry_dt_scale: float = 0.5
     allow_failed_windows: int = 0
+    gap_fill_max_new: int = 4  # cap on new windows per `extend --fill-gaps` call, per replica
     skip_movie: bool = False
     movie_frames: int = 0
     pymol_headless: bool = True
