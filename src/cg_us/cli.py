@@ -235,6 +235,8 @@ def cmd_extend(args) -> int:
         entries = [e for e in entries if e.name in args.system]
 
     total_added = 0.0
+    total_gaps_found = 0
+    total_gaps_filled = 0
     for e in entries:
         for rep in range(1, proto.replicas + 1):
             if args.replica and rep != args.replica:
@@ -254,6 +256,7 @@ def cmd_extend(args) -> int:
                 gaps = win.find_gaps(detail.get("overlaps") or [],
                                      detail.get("window_centers_nm") or [],
                                      overlap_min)
+                total_gaps_found += len(gaps)
                 print(f"[extend] {e.name} rep{rep}: {len(gaps)} gap(s) below overlap {overlap_min}")
                 for g in gaps:
                     print(f"          {g['before_nm']:.3f}-{g['after_nm']:.3f} nm "
@@ -262,8 +265,13 @@ def cmd_extend(args) -> int:
                 if gaps and not args.dry_run:
                     ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
                     added = direct_backend.fill_gaps(ctx)
-                    print(f"          added {len(added)} window(s); re-run `cg-us analyze` "
-                          "to see the effect")
+                    total_gaps_filled += len(added)
+                    left = len(gaps) - len(added)
+                    print(f"          added {len(added)} window(s)"
+                          + (f"; {left} gap(s) left over run.gap_fill_max_new="
+                             f"{proto.run.gap_fill_max_new}, run again after re-analyzing"
+                             if left > 0 else "")
+                          + "; re-run `cg-us analyze` to see the effect")
                 continue
 
             for round_no in range(1, args.rounds + 1):
@@ -292,7 +300,13 @@ def cmd_extend(args) -> int:
                 ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
                 direct_backend.extend_windows(ctx, actionable)
 
-    print(f"\n{'would add' if args.dry_run else 'added'} {total_added:.0f} ns in total")
+    if args.fill_gaps:
+        if args.dry_run:
+            print(f"\n{total_gaps_found} gap(s) found in total (dry run, nothing filled)")
+        else:
+            print(f"\nfilled {total_gaps_filled} of {total_gaps_found} gap(s) found")
+    else:
+        print(f"\n{'would add' if args.dry_run else 'added'} {total_added:.0f} ns in total")
     return 0
 
 

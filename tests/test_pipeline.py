@@ -121,3 +121,5 @@ def test_extend_fill_gaps_dry_run_reads_the_right_config_field(prepared, capsys)
     assert rc == 0
     out = capsys.readouterr().out
     assert "gap(s) below overlap" in out
+    assert "gap(s) found in total (dry run, nothing filled)" in out
+    assert "ns in total" not in out  # the time-extend summary line does not apply here
