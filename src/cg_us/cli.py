@@ -250,10 +250,11 @@ def cmd_extend(args) -> int:
                           "run `cg-us analyze` first, skipping --fill-gaps")
                     continue
                 detail = json.loads(result_path.read_text())["detail_overlap"]
+                overlap_min = proto.analysis.overlap_min
                 gaps = win.find_gaps(detail.get("overlaps") or [],
                                      detail.get("window_centers_nm") or [],
-                                     u.overlap_min)
-                print(f"[extend] {e.name} rep{rep}: {len(gaps)} gap(s) below overlap {u.overlap_min}")
+                                     overlap_min)
+                print(f"[extend] {e.name} rep{rep}: {len(gaps)} gap(s) below overlap {overlap_min}")
                 for g in gaps:
                     print(f"          {g['before_nm']:.3f}-{g['after_nm']:.3f} nm "
                           f"(overlap {g['overlap']:.4f}) -> candidate window near "

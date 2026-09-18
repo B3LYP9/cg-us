@@ -105,3 +105,19 @@ def test_replica_statistics_are_consistent(prepared):
         subset = rep_df[rep_df["system"] == row["system"]]["dG_kcal"]
         assert row["dG_mean"] == pytest.approx(subset.mean(), abs=0.01)
         assert row["dG_sd"] == pytest.approx(subset.std(ddof=1), abs=0.01)
+
+
+def test_extend_fill_gaps_dry_run_reads_the_right_config_field(prepared, capsys):
+    """Regression test: cmd_extend's --fill-gaps path read `proto.umbrella.overlap_min`,
+    which does not exist (it lives on `proto.analysis`), and crashed with an
+    AttributeError the first time anyone ran `cg-us extend --fill-gaps --dry-run`."""
+    cli.cmd_analyze(type("A", (), {"root": str(prepared), "no_convergence": True})())
+
+    args = type("A", (), {
+        "root": str(prepared), "system": None, "replica": None,
+        "rounds": 1, "dry_run": True, "fill_gaps": True,
+    })()
+    rc = cli.cmd_extend(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gap(s) below overlap" in out
