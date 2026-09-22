@@ -139,23 +139,39 @@ def cmd_analyze(args) -> int:
     if getattr(args, "estimator", None):
         proto.analysis.estimator = args.estimator
     entries = _entries(root)
+    wanted = set(args.system) if getattr(args, "system", None) else None
 
     replica_records: list[dict] = []
     summaries: list[dict] = []
     figures: dict = {}
 
     for e in entries:
+        refresh = wanted is None or e.name in wanted
         records = []
         for rep in range(1, proto.replicas + 1):
             wd = prep.replica_dir(root, e, rep)
             if not (wd / "tpr_files.dat").exists():
-                print(f"[analyze] {e.name} rep{rep}: no windows, skipped")
+                if refresh:
+                    print(f"[analyze] {e.name} rep{rep}: no windows, skipped")
                 continue
-            print(f"[analyze] {e.name} rep{rep}")
-            rec = analysis.analyse_replica(wd, e, proto, rep,
-                                           do_convergence=not args.no_convergence)
-            rec["npz"] = str(wd / "analysis" / "pmf.npz")
-            rec["overlap"] = rec.pop("_detail")["overlap"]
+            cached = wd / "analysis" / "replica_result.json"
+            if refresh:
+                print(f"[analyze] {e.name} rep{rep}")
+                rec = analysis.analyse_replica(wd, e, proto, rep,
+                                               do_convergence=not args.no_convergence)
+                rec["npz"] = str(wd / "analysis" / "pmf.npz")
+                rec["overlap"] = rec.pop("_detail")["overlap"]
+            elif cached.exists():
+                # --system given and this one wasn't asked for: reuse the last
+                # analyse_replica() result instead of paying for wham/UI again -
+                # the whole point of scoping analyze is to skip untouched systems.
+                rec = json.loads(cached.read_text())
+                rec["overlap"] = rec.pop("detail_overlap")
+                rec["npz"] = str(wd / "analysis" / "pmf.npz")
+            else:
+                print(f"[analyze] {e.name} rep{rep}: not selected and never "
+                      "analyzed before, skipped (run without --system once first)")
+                continue
             records.append(rec)
         if not records:
             continue
@@ -427,6 +443,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("analyze", help="WHAM, statistics, figures, report")
     a.add_argument("--root", required=True)
+    a.add_argument("--system", nargs="*", default=None,
+                   help="only re-run wham/umbrella-integration for these systems; "
+                        "everything else is pulled from its last replica_result.json "
+                        "(run once without --system first, so there is one to pull)")
     a.add_argument("--no-convergence", action="store_true")
     a.add_argument("--estimator", choices=["wham", "umbrella_integration", "auto"], default=None,
                    help="which PMF estimator reports dG (default: the protocol's, normally auto)")

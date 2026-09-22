@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.16.0 — scoped analyze
+
+`cg-us analyze` always re-ran wham + umbrella integration for every system in
+the manifest, even when only one had changed (e.g. after `extend --fill-gaps`
+on a handful of systems) - on a 30+ system campaign that means paying for a
+full re-analysis to look at one.
+
+### Added
+
+* `cg-us analyze --system <names>`: only re-runs `analyse_replica` (wham,
+  umbrella integration, convergence) for the listed systems. Every other
+  system is pulled from its own `analysis/replica_result.json`, written by
+  the last time it *was* analyzed - so `results.json`, `systems.csv`,
+  `replicas.csv`, the report and the correlation plot still cover the whole
+  campaign, not just the scoped subset. A system that was never analyzed
+  before and isn't in `--system` is skipped with a message telling you to
+  run once without `--system` first.
+
+### Compatibility
+
+`analyze` without `--system` is unchanged - full re-analysis of everything,
+exactly as before.
+
 ## 0.15.0 — gap-filling windows
 
 `cg-us extend` only ever bought a window more time; a neighbouring pair with

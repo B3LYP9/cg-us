@@ -107,6 +107,50 @@ def test_replica_statistics_are_consistent(prepared):
         assert row["dG_sd"] == pytest.approx(subset.std(ddof=1), abs=0.01)
 
 
+def test_analyze_system_filter_reuses_unselected_systems(prepared, monkeypatch):
+    """--system should only re-run wham for the requested systems; everything
+    else must be pulled from its own replica_result.json (both to save the
+    wham/UI cost, and so a --system-scoped run still produces a full report
+    covering every system, not a truncated one)."""
+    full_args = type("A", (), {"root": str(prepared), "no_convergence": True,
+                                "system": None, "estimator": None})()
+    assert cli.cmd_analyze(full_args) == 0
+
+    before = json.loads((prepared / "analysis" / "results.json").read_text())
+    all_systems = sorted(s["system"] for s in before["systems"])
+    assert len(all_systems) == 6
+    target_system = all_systems[0]
+
+    calls = []
+    real_run_wham = wham.run_wham
+
+    def counting_run_wham(workdir, *a, **k):
+        calls.append(Path(workdir).parent.name)  # the system directory name
+        return real_run_wham(workdir, *a, **k)
+
+    monkeypatch.setattr(wham, "run_wham", counting_run_wham)
+    monkeypatch.setattr(analysis.W, "run_wham", counting_run_wham)
+
+    scoped_args = type("A", (), {"root": str(prepared), "no_convergence": True,
+                                 "system": [target_system], "estimator": None})()
+    assert cli.cmd_analyze(scoped_args) == 0
+
+    # only the requested system's replicas paid for a fresh wham call
+    assert calls and set(calls) == {target_system}
+
+    after = json.loads((prepared / "analysis" / "results.json").read_text())
+    after_systems = sorted(s["system"] for s in after["systems"])
+    assert after_systems == all_systems, "scoped analyze must not drop the other systems"
+
+    before_by_name = {s["system"]: s for s in before["systems"]}
+    after_by_name = {s["system"]: s for s in after["systems"]}
+    for name in all_systems:
+        if name == target_system:
+            continue
+        assert after_by_name[name]["dG_mean"] == before_by_name[name]["dG_mean"], (
+            f"{name} was not selected but its result changed anyway")
+
+
 def test_extend_fill_gaps_dry_run_reads_the_right_config_field(prepared, capsys):
     """Regression test: cmd_extend's --fill-gaps path read `proto.umbrella.overlap_min`,
     which does not exist (it lives on `proto.analysis`), and crashed with an
