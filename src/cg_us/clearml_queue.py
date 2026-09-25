@@ -181,7 +181,7 @@ def queue_status(queue: str | None = None) -> list[dict]:
             rows.append({"position": "running", "id": w.task.id, "name": w.task.name,
                          "worker": w.id})
     if entries:
-        tasks = {t.id: t for t in client.tasks.get_all(id=entries, only_fields=["name", "status"])}
+        tasks = {t.id: t for t in client.tasks.get_all(id=entries, only_fields=["id", "name", "status"])}
         for pos, tid in enumerate(entries, start=1):
             t = tasks.get(tid)
             rows.append({"position": pos, "id": tid, "name": getattr(t, "name", "?"),
