@@ -47,6 +47,12 @@ class FakeTask:
     def set_parameter(self, k, v):
         self.params[k] = v
 
+    def set_name(self, name):
+        self.name = name
+
+    def set_comment(self, comment):
+        self.comment = comment
+
     def add_tags(self, tags):
         self.tags += tags
 
@@ -99,7 +105,7 @@ def test_enqueue_creates_one_task_on_the_default_queue(fake_clearml, tmp_path, m
 
     (task,) = fake_clearml.created
     assert fake_clearml.enqueued == [(task.id, "a100-1")]
-    assert task.name == "cg-us run gdf8 s1,s2 +1"
+    assert task.name == "us_gdf8 run s1,s2 +1"
     assert task.project == "GP20181/Umbrella sampling/run"
     assert task.kw["script"].endswith("_clearml_launcher.py")
     assert task.kw["force_single_script_file"] is True
@@ -188,3 +194,23 @@ def test_project_is_an_argument_and_commands_go_to_their_own_subfolder(fake_clea
     monkeypatch.setenv("CGUS_CLEARML_PROJECT", "GP7")
     cli.main(["run", "--root", "r", "--enqueue"])
     assert fake_clearml.created[-1].project == "GP7/Umbrella sampling/run"
+
+
+def test_task_title_follows_the_replica_that_is_running(fake_clearml, tmp_path):
+    script = ("print('[run] 4 cores'); print('[run] sysA rep1 via direct in x'); "
+              "print('[run] sysA rep2: already sampled, skipping'); "
+              "print('[run] sysB rep3 via direct in y')")
+    titles = []
+    orig = FakeTask.set_name
+    FakeTask.set_name = lambda self, n: titles.append(n)
+    FakeTask.set_comment = lambda self, c: titles.append(c)
+    try:
+        task = FakeTask("p", "us_x run")
+        task.params = {"cgus/name": "us_x run", "cgus/exe": json.dumps([sys.executable, "-c", script]),
+                       "cgus/argv": "[]", "cgus/cwd": str(tmp_path), "cgus/env": "{}"}
+        fake_clearml.current = task
+        with pytest.raises(SystemExit):
+            runpy.run_path(str(LAUNCHER), run_name="__main__")
+    finally:
+        FakeTask.set_name = orig
+    assert titles == ["us_x run | sysA rep1", "now: sysA rep1", "us_x run | sysB rep3", "now: sysB rep3"]

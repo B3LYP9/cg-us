@@ -109,9 +109,9 @@ def _describe(argv: list[str]) -> str:
             j += 1
     if "--root" in argv and argv.index("--root") + 1 < len(argv):
         root = Path(argv[argv.index("--root") + 1]).name
-    bits = [f"cg-us {cmd}"]
-    if root:
-        bits.append(root)
+    # "us_<run folder> <command> [systems]": the prefix keeps US jobs together in the
+    # ClearML lists next to other tools' tasks
+    bits = [f"us_{root}" if root else "us", cmd]
     if systems:
         bits.append(",".join(systems[:2]) + (f" +{len(systems) - 2}" if len(systems) > 2 else ""))
     return " ".join(bits)
@@ -148,6 +148,7 @@ def submit(argv: list[str], *, queue: str | None = None, name: str | None = None
         f"{PARAM_SECTION}/cwd": cwd,
         f"{PARAM_SECTION}/env": json.dumps(_capture_env()),
         f"{PARAM_SECTION}/queue": queue,
+        f"{PARAM_SECTION}/name": name,
         f"{PARAM_SECTION}/project": project_name,
     })
     task.add_tags(["cg-us", argv[0] if argv else "cmd"])

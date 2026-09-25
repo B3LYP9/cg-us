@@ -9,6 +9,7 @@ task console. The exit code becomes the task status.
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -46,8 +47,21 @@ def _stop(signum, _frame):
 signal.signal(signal.SIGTERM, _stop)
 signal.signal(signal.SIGINT, _stop)
 
+# cg-us announces each replica it starts as "[run|extend|analyze] <system> rep<N>[...]";
+# the task title follows it, so the queue and worker views say what is going on now
+PROGRESS = re.compile(r"^\[(?:run|extend|analyze)\] (\S+) rep(\d+)\b")
+base = params.get("name") or task.name
+current = None
 for line in proc.stdout:
     print(line, end="", flush=True)
+    m = PROGRESS.match(line)
+    if m and "skip" not in line and m.groups() != current:
+        current = m.groups()
+        try:
+            task.set_name(f"{base} | {current[0]} rep{current[1]}")
+            task.set_comment(f"now: {current[0]} rep{current[1]}")
+        except Exception:
+            pass  # a lost title update must not stop the simulation
 rc = proc.wait()
 task.set_parameter("cgus/exit_code", str(rc))
 sys.exit(rc)

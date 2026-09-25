@@ -17,6 +17,10 @@ GPU and the cores.
   with the recorded `PATH`/GROMACS variables, streams its output to the task
   console and propagates the exit code. The agent's environment and daemon
   are not touched.
+* Task title is `us_<run folder> <command> [systems]`; while it runs, the
+  launcher follows cg-us's `[run|extend|analyze] <system> rep<N>` lines and
+  updates the title (`... | <system> rep<N>`) and comment, so the queue and
+  worker views show which replica is going.
 * `cg-us queue status [--queue NAME]` lists the running and waiting tasks.
 * `clearml` is an optional dependency: `pip install 'cg-us[queue]'`.
 
