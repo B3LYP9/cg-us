@@ -127,6 +127,50 @@ def find_gaps(overlaps: list[float], centers_nm: list[float], threshold: float) 
     ]
 
 
+KJ_PER_KCAL = 4.184
+MAX_REF_SHIFT_NM = 0.35
+
+
+def annotate_gaps(gaps: list[dict], nodes_nm, grads_kcal, k_kj: float) -> list[dict]:
+    """Attach what a window in each gap needs to actually land there.
+
+    `nodes_nm`/`grads_kcal` are every existing window's mean xi and mean-force
+    gradient (kcal/mol/nm, as integration.WindowForce reports them). Where the
+    PMF is steep a window does not sit at its reference: it settles at
+    ref - grad/k, so a window pinned at the gap midpoint slides back onto its
+    neighbours and the gap stays open (a third of the windows `--fill-gaps`
+    added in the first big_bench pass did exactly that). Interpolating the
+    neighbours' gradient to the midpoint gives the shift to pre-compensate.
+
+    Also estimates the trapezoid error umbrella integration makes across the
+    gap, dx^2 |d grad| / 12 (kcal/mol) - the number that says whether closing
+    this gap can change dG at all.
+    """
+    nodes = np.asarray(nodes_nm, float)
+    grads = np.asarray(grads_kcal, float)
+    out = []
+    for g in gaps:
+        item = dict(g)
+        if nodes.size >= 2:
+            order = np.argsort(nodes)
+            xs, gs = nodes[order], grads[order]
+            target = g["target_distance"]
+            grad_mid = float(np.interp(target, xs, gs))
+            ga = float(np.interp(g["before_nm"], xs, gs))
+            gb = float(np.interp(g["after_nm"], xs, gs))
+            dx = g["after_nm"] - g["before_nm"]
+            shift = float(np.clip(grad_mid * KJ_PER_KCAL / k_kj, -MAX_REF_SHIFT_NM, MAX_REF_SHIFT_NM))
+            item["grad_kcal"] = round(grad_mid, 2)
+            item["ref_distance"] = round(target + shift, 4)
+            item["est_error_kcal"] = round(dx * dx * abs(gb - ga) / 12.0, 4)
+        else:
+            item["grad_kcal"] = None
+            item["ref_distance"] = g["target_distance"]
+            item["est_error_kcal"] = None
+        out.append(item)
+    return out
+
+
 def select_gap_frames(frames: np.ndarray, dists: np.ndarray, gaps: list[dict],
                       used: set[int]) -> list[dict]:
     """One nearest not-yet-used SMD frame per gap midpoint.
@@ -150,5 +194,6 @@ def select_gap_frames(frames: np.ndarray, dists: np.ndarray, gaps: list[dict],
             "gap_before_nm": gap["before_nm"],
             "gap_after_nm": gap["after_nm"],
             "gap_overlap": gap["overlap"],
+            **{k: gap[k] for k in ("ref_distance", "grad_kcal", "est_error_kcal") if k in gap},
         })
     return picked

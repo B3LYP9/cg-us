@@ -1106,6 +1106,58 @@ def test_fill_gaps_adds_one_window_per_broken_pair(monkeypatch, tmp_path):
         assert added2[0]["frame"] != added[0]["frame"]
 
 
+def test_annotate_gaps_precompensates_the_slide_and_estimates_the_error():
+    gaps = [{"before_nm": 1.2, "after_nm": 1.4, "target_distance": 1.3, "overlap": 0.0}]
+    out = windows.annotate_gaps(gaps, [1.0, 1.2, 1.4, 1.6], [0.0, 10.0, 60.0, 62.0], 1000.0)[0]
+    # gradient at the midpoint is 35 kcal/mol/nm -> a 0.146 nm slide at k = 1000
+    assert out["grad_kcal"] == pytest.approx(35.0)
+    assert out["ref_distance"] == pytest.approx(1.3 + 35.0 * 4.184 / 1000.0, abs=1e-3)
+    assert out["est_error_kcal"] == pytest.approx(0.2 ** 2 * 50.0 / 12.0, abs=1e-3)
+
+    steep = windows.annotate_gaps(gaps, [1.0, 1.6], [200.0, 200.0], 1000.0)[0]
+    assert steep["ref_distance"] == pytest.approx(1.3 + windows.MAX_REF_SHIFT_NM)
+
+    flat = windows.annotate_gaps(gaps, [1.0, 1.6], [0.0, 0.0], 1000.0)[0]
+    assert flat["ref_distance"] == pytest.approx(1.3)
+    assert flat["est_error_kcal"] == 0.0
+
+
+def test_plan_gaps_filters_by_region_and_error(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from cg_us.backends import direct
+
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "analysis" / "replica_result.json").write_text(json.dumps({
+        "bound_xi_nm": 1.0, "xi_range_nm": [0.8, 3.0],
+        "detail_overlap": {"overlaps": [0.0, 0.0, 0.0],
+                           "window_centers_nm": [0.9, 1.3, 2.4, 2.9]},
+    }))
+    ws = [SimpleNamespace(xi_mean=x, grad=g) for x, g in
+          [(0.9, 0.0), (1.3, 40.0), (2.4, 5.0), (2.9, 4.0)]]
+    monkeypatch.setattr(direct.UI, "profile_from_windows",
+                        lambda *a, **k: SimpleNamespace(windows=ws))
+    ctx = _fake_ctx(tmp_path)
+    ctx.proto.analysis.plateau_width = 0.4
+
+    every = direct.plan_gaps(ctx)
+    assert len(every) == 3 and all("ref_distance" in g for g in every)
+
+    inside = direct.plan_gaps(ctx, well_only=True)   # plateau starts at 2.6 nm
+    assert [g["target_distance"] for g in inside] == [1.1, 1.85]
+
+    # est. trapezoid errors: 0.53 (0.9-1.3), 3.5 (1.3-2.4), 0.02 (2.4-2.9) kcal/mol
+    assert [g["target_distance"] for g in direct.plan_gaps(ctx, min_error_kcal=0.5)] == [1.1, 1.85]
+    assert [g["target_distance"] for g in direct.plan_gaps(ctx, min_error_kcal=1.0)] == [1.85]
+
+
+def test_window_targets_prefers_the_pinned_reference(tmp_path):
+    from cg_us.backends import direct
+    (tmp_path / "windows.json").write_text(json.dumps({"windows": [
+        {"window": 0, "target_distance": 1.2},
+        {"window": 1, "target_distance": 2.75, "ref_distance": 2.96}]}))
+    assert direct.window_targets(_fake_ctx(tmp_path)) == {0: 1.2, 1: 2.96}
+
+
 def test_fill_gaps_requires_analysis_first(tmp_path):
     from cg_us.backends import direct
     from cg_us.backends.base import GmxError

@@ -96,6 +96,7 @@ class Run:
     retry_dt_scale: float = 0.5
     allow_failed_windows: int = 0
     gap_fill_max_new: int = 4  # cap on new windows per `extend --fill-gaps` call, per replica
+    gap_fill_min_error_kcal: float = 0.0  # skip gaps whose umbrella-integration trapezoid error is below this
     skip_movie: bool = False
     movie_frames: int = 0
     pymol_headless: bool = True

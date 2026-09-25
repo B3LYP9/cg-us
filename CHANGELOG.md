@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.17.0 — gap-filling that lands where it is aimed, and only where it matters
+
+First big_bench pass of `extend --fill-gaps` (163 windows, ~900 ns) closed 66%
+of the gaps but 36% of the new windows (44% inside the well-to-plateau
+region) did not sample where they were pinned: on a steep PMF a window settles
+at `ref - grad/k`, so a window pinned at the gap midpoint slid back onto its
+neighbours (keap1_nrf2 rep1: pinned 2.75 nm, sampled 2.505 nm) and the gap
+stayed open. Separately, umbrella integration (the estimator on 64% of
+replicas) does not need histogram overlap at all, and the trapezoid error
+across a typical remaining gap is ~0.01 kcal/mol (raw), so most gaps could not
+change dG.
+
+### Added / changed
+
+* `windows.annotate_gaps`: interpolates the neighbouring windows' mean-force
+  gradient to the gap midpoint, returns the reference to pin at
+  (`target + grad/k`, capped at 0.35 nm) so the window's *mean* lands on the
+  midpoint, and the trapezoid error umbrella integration makes across the gap,
+  `dx^2 |d grad| / 12` (kcal/mol).
+* `direct.plan_gaps` / `fill_gaps` pin gap windows at that reference
+  (`ref_distance` in `windows.json`, honoured by `window_targets`).
+* `extend --fill-gaps --min-error KCAL` (protocol: `run.gap_fill_min_error_kcal`)
+  skips gaps whose estimated integration error is below KCAL;
+  `--well-only` keeps only gaps between the bound-state minimum and the start
+  of the plateau. The dry run now prints the pin position and estimated error.
+* `cg-us analyze --bootstraps N`: overrides `wham.bootstraps` for the run.
+  The 200 bootstraps dominate analysis time (one replica ran >75 min on a
+  shared box, against ~2 min without contention) and only feed the WHAM error
+  bar; umbrella integration does not use them, so `--bootstraps 0` is the fast
+  path when dG comes from UI.
+
+### Measured on big_bench (4 replicas whose first-pass gap did not move)
+
+keap1_nrf2 rep1, mdm2_pmi rep3, mdm2_p53 rep3, dlk1_variant2 rep3, one
+compensated window each: every gap narrowed and its overlap rose (mdm2_p53
+rep3 0.0016 -> 0.022; mdm2_pmi rep3 0.0 -> 0.0056, 0.46 -> 0.33 nm wide;
+dlk1_variant2 rep3 0.0 -> 0.0038; keap1 rep1 0.0 -> 0.0004), where the
+first-pass windows left them unchanged. New windows landed inside their gap
+(mdm2_pmi rep3: mean 1.737 nm, pinned 1.795, target 1.641; before the fix
+1.328 nm). One pass is not enough on the steepest cliffs (keap1 rep1: mean
+2.603 for a 2.75 target - the slope inside the gap is steeper than the linear
+interpolation of the neighbours), so re-analyze and run it again: each pass
+adds a measured gradient point inside the gap.
+
 ## 0.16.0 — scoped analyze
 
 `cg-us analyze` always re-ran wham + umbrella integration for every system in

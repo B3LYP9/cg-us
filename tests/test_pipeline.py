@@ -151,6 +151,22 @@ def test_analyze_system_filter_reuses_unselected_systems(prepared, monkeypatch):
             f"{name} was not selected but its result changed anyway")
 
 
+def test_analyze_bootstraps_override_reaches_wham(prepared, monkeypatch):
+    seen = []
+    inner = wham.run_wham
+
+    def spy(workdir, proto, *a, **k):
+        seen.append(proto.wham.bootstraps)
+        return inner(workdir, proto, *a, **k)
+
+    monkeypatch.setattr(wham, "run_wham", spy)
+    monkeypatch.setattr(analysis.W, "run_wham", spy)
+    args = type("A", (), {"root": str(prepared), "no_convergence": True, "system": None,
+                          "estimator": None, "bootstraps": 0})()
+    assert cli.cmd_analyze(args) == 0
+    assert seen and set(seen) == {0}
+
+
 def test_extend_fill_gaps_dry_run_reads_the_right_config_field(prepared, capsys):
     """Regression test: cmd_extend's --fill-gaps path read `proto.umbrella.overlap_min`,
     which does not exist (it lives on `proto.analysis`), and crashed with an

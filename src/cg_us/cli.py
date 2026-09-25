@@ -138,6 +138,8 @@ def cmd_analyze(args) -> int:
     proto = _protocol(root)
     if getattr(args, "estimator", None):
         proto.analysis.estimator = args.estimator
+    if getattr(args, "bootstraps", None) is not None:
+        proto.wham.bootstraps = args.bootstraps
     entries = _entries(root)
     wanted = set(args.system) if getattr(args, "system", None) else None
 
@@ -262,25 +264,25 @@ def cmd_extend(args) -> int:
                 continue
 
             if args.fill_gaps:
-                result_path = wd / "analysis" / "replica_result.json"
-                if not result_path.exists():
+                if not (wd / "analysis" / "replica_result.json").exists():
                     print(f"[extend] {e.name} rep{rep}: no analysis yet - "
                           "run `cg-us analyze` first, skipping --fill-gaps")
                     continue
-                detail = json.loads(result_path.read_text())["detail_overlap"]
+                ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
+                min_err = getattr(args, "min_error", None)
+                well = bool(getattr(args, "well_only", False))
+                gaps = direct_backend.plan_gaps(ctx, min_error_kcal=min_err, well_only=well)
                 overlap_min = proto.analysis.overlap_min
-                gaps = win.find_gaps(detail.get("overlaps") or [],
-                                     detail.get("window_centers_nm") or [],
-                                     overlap_min)
                 total_gaps_found += len(gaps)
                 print(f"[extend] {e.name} rep{rep}: {len(gaps)} gap(s) below overlap {overlap_min}")
                 for g in gaps:
+                    err = g.get("est_error_kcal")
                     print(f"          {g['before_nm']:.3f}-{g['after_nm']:.3f} nm "
-                          f"(overlap {g['overlap']:.4f}) -> candidate window near "
-                          f"{g['target_distance']:.3f} nm")
+                          f"(overlap {g['overlap']:.4f}) -> window mean {g['target_distance']:.3f} nm, "
+                          f"pin at {g.get('ref_distance', g['target_distance']):.3f} nm"
+                          + (f", est. dG error {err:.3f} kcal/mol" if err is not None else ""))
                 if gaps and not args.dry_run:
-                    ctx = RunContext(entry=e, proto=proto, workdir=wd, replica=rep)
-                    added = direct_backend.fill_gaps(ctx)
+                    added = direct_backend.fill_gaps(ctx, min_error_kcal=min_err, well_only=well)
                     total_gaps_filled += len(added)
                     left = len(gaps) - len(added)
                     print(f"          added {len(added)} window(s)"
@@ -427,6 +429,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="instead of lengthening windows, add one window (from an existing "
                         "SMD frame) between each adjacent pair whose histogram overlap is "
                         "below analysis.overlap_min - needs `cg-us analyze` to have run first")
+    x.add_argument("--min-error", type=float, default=None, metavar="KCAL",
+                   help="with --fill-gaps: skip gaps where umbrella integration's trapezoid "
+                        "error across the gap is below this (kcal/mol, raw units); "
+                        "default run.gap_fill_min_error_kcal")
+    x.add_argument("--well-only", action="store_true",
+                   help="with --fill-gaps: only gaps between the bound-state minimum and "
+                        "the start of the plateau - anywhere else they cannot move dG")
     x.set_defaults(func=cmd_extend)
 
     b = sub.add_parser("bench", help="measure mdrun throughput and window concurrency")
@@ -448,6 +457,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "everything else is pulled from its last replica_result.json "
                         "(run once without --system first, so there is one to pull)")
     a.add_argument("--no-convergence", action="store_true")
+    a.add_argument("--bootstraps", type=int, default=None, metavar="N",
+                   help="gmx wham bootstrap count for this run (protocol default 200). The "
+                        "bootstraps dominate analysis time (minutes to hours per replica on a "
+                        "shared box) and only feed the WHAM error bar; umbrella integration "
+                        "does not use them, so --bootstraps 0 is the fast path")
     a.add_argument("--estimator", choices=["wham", "umbrella_integration", "auto"], default=None,
                    help="which PMF estimator reports dG (default: the protocol's, normally auto)")
     a.set_defaults(func=cmd_analyze)

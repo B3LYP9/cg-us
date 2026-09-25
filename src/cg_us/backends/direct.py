@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import integration as UI
 from .. import windows as win
 from ..xvg import read_xvg
 from .base import (Gmx, GmxError, RunContext, available_cores, build_index,
@@ -248,8 +249,56 @@ def extend_windows(ctx: RunContext, plan: list[dict]) -> list[dict]:
             return list(pool.map(one, plan))
 
 
+def plan_gaps(ctx: RunContext, threshold: float | None = None,
+              min_error_kcal: float | None = None, well_only: bool = False) -> list[dict]:
+    """Gaps worth a window, each annotated with the reference to pin it at.
+
+    Reads the replica's last analysis (`analysis/replica_result.json`), asks
+    umbrella integration for every window's mean-force gradient, and keeps the
+    gaps that (a) are below the overlap threshold, (b) if `well_only`, lie
+    between the bound-state minimum and the start of the plateau - anywhere
+    else they cannot move dG - and (c) if `min_error_kcal` > 0, would make the
+    trapezoid integration err by at least that much.
+    """
+    wd = ctx.workdir
+    result_path = wd / "analysis" / "replica_result.json"
+    if not result_path.exists():
+        raise GmxError(
+            f"{wd}: no analysis/replica_result.json - run `cg-us analyze` for this "
+            "replica before filling gaps, so there is a histogram overlap to fill them from"
+        )
+    saved = json.loads(result_path.read_text())
+    detail = saved["detail_overlap"]
+    overlaps, centers = detail.get("overlaps") or [], detail.get("window_centers_nm") or []
+    threshold = ctx.proto.analysis.overlap_min if threshold is None else threshold
+    gaps = win.find_gaps(overlaps, centers, threshold)
+    if not gaps:
+        return []
+
+    try:
+        forces = UI.profile_from_windows(wd, ctx.proto.umbrella.discard_ns * 1000,
+                                         k=ctx.proto.umbrella.k).windows
+    except Exception:
+        forces = []
+    gaps = win.annotate_gaps(gaps, [w.xi_mean for w in forces], [w.grad for w in forces],
+                             ctx.proto.umbrella.k)
+
+    if well_only:
+        lo = saved.get("bound_xi_nm")
+        rng = saved.get("xi_range_nm")
+        if lo is not None and rng:
+            hi = rng[1] - ctx.proto.analysis.plateau_width
+            gaps = [g for g in gaps if lo <= g["target_distance"] <= hi]
+    min_error_kcal = ctx.proto.run.gap_fill_min_error_kcal if min_error_kcal is None else min_error_kcal
+    if min_error_kcal and min_error_kcal > 0:
+        gaps = [g for g in gaps if g.get("est_error_kcal") is not None
+                and g["est_error_kcal"] >= min_error_kcal]
+    return gaps
+
+
 def fill_gaps(ctx: RunContext, threshold: float | None = None,
-             max_new: int | None = None) -> list[dict]:
+              max_new: int | None = None, min_error_kcal: float | None = None,
+              well_only: bool = False) -> list[dict]:
     """Add one window per near-zero-overlap adjacent pair.
 
     A broken pair (no shared samples between neighbouring histograms) leaves
@@ -260,21 +309,16 @@ def fill_gaps(ctx: RunContext, threshold: float | None = None,
     wrote every frame cg-us did not pick for the original ladder, so filling
     a gap costs one more mdrun, not a new pull.
 
+    Where the PMF is steep the new window would slide off its reference onto
+    its neighbours, so its reference is shifted by the interpolated mean-force
+    gradient (`plan_gaps`) to make the *mean* land at the gap midpoint.
+
     Requires `cg-us analyze` to have already run for this replica (reads its
     histogram overlap from `analysis/replica_result.json`); run it again
     afterwards to see whether the gap is gone.
     """
     wd = ctx.workdir
-    result_path = wd / "analysis" / "replica_result.json"
-    if not result_path.exists():
-        raise GmxError(
-            f"{wd}: no analysis/replica_result.json - run `cg-us analyze` for this "
-            "replica before filling gaps, so there is a histogram overlap to fill them from"
-        )
-    detail = json.loads(result_path.read_text())["detail_overlap"]
-    overlaps, centers = detail.get("overlaps") or [], detail.get("window_centers_nm") or []
-    threshold = ctx.proto.analysis.overlap_min if threshold is None else threshold
-    gaps = win.find_gaps(overlaps, centers, threshold)
+    gaps = plan_gaps(ctx, threshold, min_error_kcal, well_only)
     if not gaps:
         return []
     max_new = ctx.proto.run.gap_fill_max_new if max_new is None else max_new
@@ -375,13 +419,18 @@ PULL_INIT_RE = re.compile(r"^pull_coord1_(init|start)\b.*$", re.M)
 
 
 def window_targets(ctx: RunContext) -> dict[int, float]:
-    """Planned reference for each window, in the pull coordinate."""
+    """Reference each window is pinned to, in the pull coordinate.
+
+    A gap-filling window carries `ref_distance`: where the umbrella has to sit
+    so that the window's *mean* lands on `target_distance` once the PMF slope
+    has pulled it off the reference.
+    """
     f = ctx.workdir / "windows.json"
     if not f.exists():
         return {}
     out = {}
     for w in json.loads(f.read_text()).get("windows", []):
-        val = w.get("target_distance", w.get("distance"))
+        val = w.get("ref_distance", w.get("target_distance", w.get("distance")))
         if val is not None:
             out[int(w["window"])] = float(val)
     return out
