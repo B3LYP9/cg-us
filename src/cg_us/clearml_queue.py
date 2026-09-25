@@ -98,23 +98,23 @@ def _import_clearml():
 
 
 def _describe(argv: list[str]) -> str:
-    """Short task name: the subcommand plus the systems/root it touches."""
-    cmd = argv[0] if argv else "cg-us"
-    systems: list[str] = []
+    """Task title: `us_<command>_<run folder>`. The launcher appends
+    `_<system>_rep<N>` while the command works on that replica."""
+    cmd = argv[0] if argv else "cmd"
     root = None
+    if "--root" in argv and argv.index("--root") + 1 < len(argv):
+        root = Path(argv[argv.index("--root") + 1]).name
+    return f"us_{cmd}_{root}" if root else f"us_{cmd}"
+
+
+def _systems(argv: list[str]) -> list[str]:
+    out: list[str] = []
     if "--system" in argv:
         j = argv.index("--system") + 1
         while j < len(argv) and not argv[j].startswith("--"):
-            systems.append(argv[j])
+            out.append(argv[j])
             j += 1
-    if "--root" in argv and argv.index("--root") + 1 < len(argv):
-        root = Path(argv[argv.index("--root") + 1]).name
-    # "us_<run folder> <command> [systems]": the prefix keeps US jobs together in the
-    # ClearML lists next to other tools' tasks
-    bits = [f"us_{root}" if root else "us", cmd]
-    if systems:
-        bits.append(",".join(systems[:2]) + (f" +{len(systems) - 2}" if len(systems) > 2 else ""))
-    return " ".join(bits)
+    return out
 
 
 def _capture_env() -> dict:
@@ -151,6 +151,9 @@ def submit(argv: list[str], *, queue: str | None = None, name: str | None = None
         f"{PARAM_SECTION}/name": name,
         f"{PARAM_SECTION}/project": project_name,
     })
+    systems = _systems(argv)
+    if systems:
+        task.set_comment("systems: " + ", ".join(systems))
     task.add_tags(["cg-us", argv[0] if argv else "cmd"])
     Task.enqueue(task, queue_name=queue)
     info = {"id": task.id, "name": name, "queue": queue, "cwd": cwd, "project": project_name}

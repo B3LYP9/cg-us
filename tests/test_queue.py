@@ -105,7 +105,7 @@ def test_enqueue_creates_one_task_on_the_default_queue(fake_clearml, tmp_path, m
 
     (task,) = fake_clearml.created
     assert fake_clearml.enqueued == [(task.id, "a100-1")]
-    assert task.name == "us_gdf8 run s1,s2 +1"
+    assert task.name == "us_run_gdf8"
     assert task.project == "GP20181/Umbrella sampling/run"
     assert task.kw["script"].endswith("_clearml_launcher.py")
     assert task.kw["force_single_script_file"] is True
@@ -129,7 +129,7 @@ def test_two_submissions_keep_their_order(fake_clearml):
     cli.main(["run", "--root", "r", "--enqueue"])
     cli.main(["analyze", "--root", "r", "--enqueue"])
     cli.main(["extend", "--root", "r", "--enqueue"])
-    assert [t.name.split()[1] for t in fake_clearml.created] == ["run", "analyze", "extend"]
+    assert [t.name for t in fake_clearml.created] == ["us_run_r", "us_analyze_r", "us_extend_r"]
     assert [tid for tid, _ in fake_clearml.enqueued] == [t.id for t in fake_clearml.created]
 
 
@@ -205,12 +205,12 @@ def test_task_title_follows_the_replica_that_is_running(fake_clearml, tmp_path):
     FakeTask.set_name = lambda self, n: titles.append(n)
     FakeTask.set_comment = lambda self, c: titles.append(c)
     try:
-        task = FakeTask("p", "us_x run")
-        task.params = {"cgus/name": "us_x run", "cgus/exe": json.dumps([sys.executable, "-c", script]),
+        task = FakeTask("p", "us_run_x")
+        task.params = {"cgus/name": "us_run_x", "cgus/exe": json.dumps([sys.executable, "-c", script]),
                        "cgus/argv": "[]", "cgus/cwd": str(tmp_path), "cgus/env": "{}"}
         fake_clearml.current = task
         with pytest.raises(SystemExit):
             runpy.run_path(str(LAUNCHER), run_name="__main__")
     finally:
         FakeTask.set_name = orig
-    assert titles == ["us_x run | sysA rep1", "now: sysA rep1", "us_x run | sysB rep3", "now: sysB rep3"]
+    assert titles == ["us_run_x_sysA_rep1", "now: sysA rep1", "us_run_x_sysB_rep3", "now: sysB rep3"]

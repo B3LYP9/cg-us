@@ -58,7 +58,7 @@ for line in proc.stdout:
     if m and "skip" not in line and m.groups() != current:
         current = m.groups()
         try:
-            task.set_name(f"{base} | {current[0]} rep{current[1]}")
+            task.set_name(f"{base}_{current[0]}_rep{current[1]}")
             task.set_comment(f"now: {current[0]} rep{current[1]}")
         except Exception:
             pass  # a lost title update must not stop the simulation
