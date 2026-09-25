@@ -485,10 +485,57 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--no-convergence", action="store_true")
     al.set_defaults(func=cmd_all)
+
+    qq = sub.add_parser("queue", help="inspect the ClearML queue that --enqueue submits to")
+    qq.add_argument("action", choices=["status"])
+    qq.add_argument("--queue", default=None, help="queue name (default $CGUS_CLEARML_QUEUE or a100-1)")
+    qq.set_defaults(func=cmd_queue)
+
+    # documented on every command that can be queued; consumed in main() before parsing
+    for parser in (pr, r, x, a, al, b):
+        parser.add_argument("--enqueue", action="store_true",
+                            help="do not run now: submit the command to a ClearML queue, where it "
+                                 "starts after the jobs already waiting (needs `pip install clearml`)")
+        parser.add_argument("--queue", default=None, metavar="NAME",
+                            help="ClearML queue for --enqueue (default $CGUS_CLEARML_QUEUE or a100-1); "
+                                 "implies --enqueue")
+        parser.add_argument("--project", default=None, metavar="NAME",
+                            help="ClearML project for --enqueue (default $CGUS_CLEARML_PROJECT or GP20181); "
+                                 "the task lands in <project>/Umbrella sampling/<run|analysis|extend>; "
+                                 "implies --enqueue")
+        parser.add_argument("--task-name", default=None, metavar="TEXT",
+                            help="task title in the ClearML UI (default: command, root, systems)")
     return p
 
 
+def cmd_queue(args) -> int:
+    from . import clearml_queue as cq
+
+    if args.action == "status":
+        rows = cq.queue_status(args.queue)
+        if not rows:
+            print(f"queue '{args.queue or cq.default_queue()}' is empty")
+            return 0
+        for r in rows:
+            pos = "running" if r["position"] == "running" else f"#{r['position']}"
+            print(f"{pos:>8}  {r['id']}  {r['name']}" + (f"  [{r['worker']}]" if r["worker"] else ""))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    from . import clearml_queue as cq
+
+    # `queue status --queue X` is a plain option of that command, not a request to enqueue
+    child, own = cq.split_own_flags(argv) if argv and argv[0] in cq.QUEUEABLE else (argv, {"enqueue": False})
+    if own["enqueue"]:
+        try:
+            info = cq.submit(child, queue=own["queue"], name=own["name"], project=own["project"])
+        except cq.QueueError as exc:
+            print(f"[queue] {exc}", file=sys.stderr)
+            return 1
+        cq.print_submitted(info)
+        return 0
     args = build_parser().parse_args(argv)
     return args.func(args)
 

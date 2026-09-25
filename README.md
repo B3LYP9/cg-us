@@ -125,6 +125,24 @@ runs/bench6/
   report.html              самодостаточный отчёт со всеми картинками
 ```
 
+## Очередь ClearML
+
+Команды `prep`, `run`, `extend`, `analyze`, `all`, `bench` можно не запускать сразу, а ставить в очередь ClearML: добавьте `--enqueue`. Агент очереди берёт по одной задаче, поэтому задачи идут друг за другом и не делят между собой GPU и ядра; очередь и консольный лог видны в веб-интерфейсе ClearML.
+
+```bash
+pip install 'cg-us[queue]'        # один раз: ставит clearml (credentials берутся из ~/clearml.conf)
+
+cg-us run     --root runs/gdf8 --manifest manifest_gdf8.csv --enqueue
+cg-us extend  --root runs/gdf8 --fill-gaps --enqueue
+cg-us analyze --root runs/gdf8 --bootstraps 0 --system gdf8_df3 --enqueue
+cg-us queue status                # что идёт и что ждёт, в порядке запуска
+```
+
+* Проект передаётся отдельным аргументом: `--project GP20181` (по умолчанию `$CGUS_CLEARML_PROJECT`, иначе `GP20181`). Задачи раскладываются по папкам `<проект>/Umbrella sampling/run`, `.../analysis` и `.../extend` (`prep`, `all`, `bench` попадают в `run`).
+* Очередь: `--queue NAME` (по умолчанию `$CGUS_CLEARML_QUEUE`, иначе `a100-1`). Название задачи: `--task-name TEXT`. `--queue` и `--project` сами по себе тоже включают `--enqueue`.
+* Задача запускает тот же `cg-us`, что и поставил её в очередь (тот же интерпретатор, рабочая папка и `PATH` с gmx), окружение агент не пересобирает и его настройки не меняются.
+* Очередь знает только о задачах ClearML: запущенное руками через `nohup` она не видит и под него не ждёт.
+
 ## Протокол
 
 Всё в `protocol.yaml`, значения по умолчанию — в комплекте. Ключевое:

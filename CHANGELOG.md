@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.18.0 — ClearML queue
+
+`cg-us prep|run|extend|analyze|all|bench ... --enqueue` submits the command to a
+ClearML queue instead of running it; the shared agent takes tasks one at a
+time, so queued commands run one after another instead of competing for the
+GPU and the cores.
+
+* Tasks are created in `<project>/Umbrella sampling/<run|analysis|extend>`
+  (`prep`, `all`, `bench` go to `run`). The project is its own argument,
+  `--project NAME` (default `$CGUS_CLEARML_PROJECT`, else `GP20181`); the
+  queue is `--queue NAME` (default `$CGUS_CLEARML_QUEUE`, else `a100-1`);
+  `--task-name` sets the title. `--queue`/`--project` imply `--enqueue`.
+* The task is a self-contained launcher (`_clearml_launcher.py`) that runs the
+  submitting interpreter's `cg_us.cli.main` in the recorded working directory
+  with the recorded `PATH`/GROMACS variables, streams its output to the task
+  console and propagates the exit code. The agent's environment and daemon
+  are not touched.
+* `cg-us queue status [--queue NAME]` lists the running and waiting tasks.
+* `clearml` is an optional dependency: `pip install 'cg-us[queue]'`.
+
 ## 0.17.0 — gap-filling that lands where it is aimed, and only where it matters
 
 First big_bench pass of `extend --fill-gaps` (163 windows, ~900 ns) closed 66%
