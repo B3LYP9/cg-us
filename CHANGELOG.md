@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.1 — SMD frames can be deleted
+
+`coordinates_SMD` (1251 `.gro` frames, about 3 GB per replica) is read only to start a
+window whose npt run does not exist yet (a fresh window, a gap-filling window, a rerun).
+`backends.direct.ensure_frame` now re-extracts the needed frame from `pull.xtc` with
+`trjconv -dump` (time taken from row N of `pullx.xvg`) when the file is missing; the result
+is byte-identical to the `-sep` frame (checked on three roots and through the function on a
+real replica). Analysis, `contacts --source smd` and `extend` (time) never read the frames.
+Keep `pull.xtc`, `pull.tpr`, `pullx.xvg`, `pullf.xvg` and `distances_summary.txt`.
+
 ## 0.19.0 — interface contacts along the unbinding path
 
 `cg-us contacts --root R [--system S ...] [--replica N ...] [--source windows|smd|both]`
