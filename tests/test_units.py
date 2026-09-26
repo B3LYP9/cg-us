@@ -1561,3 +1561,34 @@ def test_truncation_slices_the_bootstrap_errors_too():
     assert cut["dG_bootstrap_error"] <= float(np.sqrt(2) * kept.max())
     assert cut["dG_bootstrap_error"] < binding_free_energy(
         _pmf(xi, g, err), plateau_width=0.4)["dG_bootstrap_error"]
+
+
+def test_ensure_frame_rebuilds_only_missing_smd_frames(tmp_path):
+    import numpy as np
+    from cg_us.backends import direct
+    from cg_us.xvg import write_xvg
+
+    wd = tmp_path
+    write_xvg(wd / "pullx.xvg", np.column_stack([np.arange(0, 20, 2.0), np.linspace(2.0, 3.0, 10)]))
+    calls = []
+
+    class FakeGmx:
+        def run(self, args, stdin=None):
+            calls.append((args, stdin))
+            out = wd / args[args.index("-o") + 1]
+            out.write_text("rebuilt")
+
+    (wd / "coordinates_SMD").mkdir()
+    (wd / "coordinates_SMD" / "coordinate3.gro").write_text("original")
+    assert direct.ensure_frame(FakeGmx(), wd, 3).read_text() == "original"
+    assert calls == []                                  # present: nothing is rebuilt
+
+    gro = direct.ensure_frame(FakeGmx(), wd, 7)
+    assert gro.read_text() == "rebuilt"
+    args, stdin = calls[0]
+    assert args[:6] == ["trjconv", "-s", "pull.tpr", "-f", "pull.xtc", "-o"]
+    assert args[args.index("-dump") + 1] == "14.0000"   # row 7 of pullx.xvg is t = 14 ps
+    assert stdin == "0\n"
+
+    with pytest.raises(direct.GmxError):
+        direct.ensure_frame(FakeGmx(), wd, 99)          # beyond the pull trajectory

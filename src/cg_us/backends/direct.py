@@ -150,6 +150,28 @@ def _frames(ctx: RunContext) -> None:
                  "-o", "coordinates_SMD/coordinate.gro", "-sep"], stdin="0\n")
 
 
+def ensure_frame(gmx, workdir: Path, frame: int) -> Path:
+    """`coordinates_SMD/coordinate<frame>.gro`, re-extracted from pull.xtc if it was cleaned up.
+
+    The frame files are only read to start a window (`_run_window`, when its
+    npt run does not exist yet: a fresh window, a gap-filling window, a rerun),
+    and every one of them can be rebuilt from `pull.xtc`, so the ~3 GB of them
+    per replica can be deleted once the ladder is sampled. Row N of pullx.xvg
+    belongs to xtc frame N (pull_nstxout equals nstxout-compressed in the pull
+    run - `_distances` already relies on this), so its time picks the frame.
+    """
+    gro = Path(workdir) / "coordinates_SMD" / f"coordinate{frame}.gro"
+    if gro.exists():
+        return gro
+    data, _ = read_xvg(Path(workdir) / "pullx.xvg")
+    if not data.size or frame >= len(data):
+        raise GmxError(f"cannot rebuild SMD frame {frame}: pullx.xvg has {len(data)} rows")
+    gro.parent.mkdir(exist_ok=True)
+    gmx.run(["trjconv", "-s", "pull.tpr", "-f", "pull.xtc", "-o", f"coordinates_SMD/coordinate{frame}.gro",
+             "-dump", f"{data[frame, 0]:.4f}"], stdin="0\n")
+    return gro
+
+
 def _distances(ctx: RunContext) -> None:
     """The SMD trace in the pull coordinate itself, not the 3-D COM distance.
 
@@ -525,6 +547,7 @@ def _run_window(ctx: RunContext, window: int, frame: int,
                else _pinned_mdp(ctx, "npt_umbrella.mdp", tag, target))
 
     if not (ctx.workdir / f"npt_{tag}.gro").exists():
+        ensure_frame(gmx, ctx.workdir, frame)
         gmx.run(["grompp", "-f", npt_mdp, "-c", gro, "-r", gro, "-p", "topol.top",
                  "-n", "index.ndx", "-o", f"npt_{tag}.tpr", "-maxwarn", mw])
         gmx.mdrun(f"npt_{tag}", proto, slot=slot, workers=workers)
