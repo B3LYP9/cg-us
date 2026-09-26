@@ -49,7 +49,7 @@ signal.signal(signal.SIGINT, _stop)
 
 # cg-us announces each replica it starts as "[run|extend|analyze] <system> rep<N>[...]";
 # the task title follows it, so the queue and worker views say what is going on now
-PROGRESS = re.compile(r"^\[(?:run|extend|analyze)\] (\S+) rep(\d+)\b")
+PROGRESS = re.compile(r"^\[(?:run|extend|analyze|contacts)\] (\S+) rep(\d+)\b")
 base = params.get("name") or task.name
 current = None
 for line in proc.stdout:

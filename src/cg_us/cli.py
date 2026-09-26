@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import analysis, experiment, plots, prep, report, wham
+from . import analysis, contacts, experiment, plots, prep, report, wham
 from .backends import chaperong as chaperong_backend
 from .backends import direct as direct_backend
 from .backends.base import RunContext
@@ -486,13 +486,24 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--no-convergence", action="store_true")
     al.set_defaults(func=cmd_all)
 
+    ct = sub.add_parser("contacts", help="interface contacts (GetContacts types) along the unbinding path")
+    ct.add_argument("--root", required=True)
+    ct.add_argument("--system", nargs="*", help="only these systems")
+    ct.add_argument("--replica", type=int, nargs="*", help="only these replica numbers")
+    ct.add_argument("--source", choices=["windows", "smd", "both"], default="both",
+                    help="umbrella windows (equilibrium, one state per window), the steered-MD pull "
+                         "(non-equilibrium, binned by distance) or both")
+    ct.add_argument("--stride-windows", type=int, default=1, help="use every Nth window frame")
+    ct.add_argument("--stride-smd", type=int, default=5, help="use every Nth pull frame (2 ps each)")
+    ct.set_defaults(func=cmd_contacts)
+
     qq = sub.add_parser("queue", help="inspect the ClearML queue that --enqueue submits to")
     qq.add_argument("action", choices=["status"])
     qq.add_argument("--queue", default=None, help="queue name (default $CGUS_CLEARML_QUEUE or a100-1)")
     qq.set_defaults(func=cmd_queue)
 
     # documented on every command that can be queued; consumed in main() before parsing
-    for parser in (pr, r, x, a, al, b):
+    for parser in (pr, r, x, a, al, b, ct):
         parser.add_argument("--enqueue", action="store_true",
                             help="do not run now: submit the command to a ClearML queue, where it "
                                  "starts after the jobs already waiting (needs `pip install clearml`)")
@@ -506,6 +517,56 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--task-name", default=None, metavar="TEXT",
                             help="task title in the ClearML UI (default: command, root, systems)")
     return p
+
+
+def cmd_contacts(args) -> int:
+    root = Path(args.root)
+    proto = _protocol(root)
+    entries = _entries(root)
+    wanted = set(args.system) if args.system else None
+    sources = ("windows", "smd") if args.source == "both" else (args.source,)
+    rows, hot, dirs = [], {}, {}
+    failed = 0
+    for e in entries:
+        if wanted and e.name not in wanted:
+            continue
+        for rep in range(1, proto.replicas + 1):
+            if args.replica and rep not in args.replica:
+                continue
+            wd = prep.replica_dir(root, e, rep)
+            if not (wd / "index.ndx").exists() or not (wd / "em.gro").exists():
+                print(f"[contacts] {e.name} rep{rep}: not prepared, skipped")
+                continue
+            print(f"[contacts] {e.name} rep{rep}")
+            try:
+                res = contacts.analyse_replica(wd, proto, sources, args.stride_windows, args.stride_smd)
+            except RuntimeError as exc:                     # MDAnalysis missing: nothing will work
+                print(f"[contacts] {exc}", file=sys.stderr)
+                return 1
+            except (OSError, ValueError) as exc:
+                print(f"[contacts] {e.name} rep{rep}: failed: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+            dirs.setdefault(e.name, []).append(wd)
+            for source, summary in res.items():
+                rows.append(contacts.summary_row(e.name, rep, summary))
+                hot.setdefault((e.name, source), []).append(summary["hotspots"])
+    if not rows:
+        print("[contacts] nothing analysed", file=sys.stderr)
+        return 1
+    out = root / "analysis"
+    out.mkdir(exist_ok=True)
+    df = pd.DataFrame(rows)
+    df.to_csv(out / "contacts_summary.csv", index=False)
+    for (system, source), lists in hot.items():
+        cons = contacts.consensus(lists)
+        print(f"[contacts] {system} {source}: consensus hotspots {', '.join(cons) or 'none'}")
+        contacts.plot_system(system, source, dirs[system], out / f"contacts_{system}_{source}.png")
+    for r in rows:
+        flag = "" if r["pull_complete"] else "  PULL INCOMPLETE: contacts remain over the last 0.3 nm"
+        print(f"[contacts] {r['system']} rep{r['replica']} {r['source']}: "
+              f"{r[contacts.ANY]} residue pairs bound, xi_half {r['xi_half_nm']}{flag}")
+    return 1 if failed and len(rows) == 0 else 0
 
 
 def cmd_queue(args) -> int:

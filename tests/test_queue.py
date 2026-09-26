@@ -183,11 +183,13 @@ def test_project_is_an_argument_and_commands_go_to_their_own_subfolder(fake_clea
     cli.main(["analyze", "--root", "r", "--project", "GP99999"])
     cli.main(["extend", "--root", "r", "--project=GP99999", "--fill-gaps"])
     cli.main(["prep", "--root", "r", "--enqueue"])
+    cli.main(["contacts", "--root", "r", "--source", "smd", "--enqueue"])
     assert [t.project for t in fake_clearml.created] == [
         "GP20181/Umbrella sampling/run",
         "GP99999/Umbrella sampling/analysis",
         "GP99999/Umbrella sampling/extend",
         "GP20181/Umbrella sampling/run",
+        "GP20181/Umbrella sampling/analysis",
     ]
     # the project flag is for the queue, not for the command that runs later
     assert "--project" not in json.loads(fake_clearml.created[1].get_parameters_as_dict()["cgus"]["argv"])

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.19.0 — interface contacts along the unbinding path
+
+`cg-us contacts --root R [--system S ...] [--replica N ...] [--source windows|smd|both]`
+classifies the target-binder contacts of every frame with the GetContacts
+interaction types (hydrogen bonds split into backbone-backbone, sidechain-backbone
+and sidechain-sidechain; salt bridges; pi-cation; pi-stacking; t-stacking;
+hydrophobic; van der Waals) and follows them as the complex is pulled apart.
+
+* Sources: the umbrella windows (equilibrium sampling, one state per window, the first
+  `umbrella.discard_ns` dropped) and the steered-MD pull (frames binned by distance,
+  every 5th frame by default; non-equilibrium, so use it for order of loss, not energetics).
+* Per replica, in `analysis/`: `contacts_<source>_counts.csv` (contacts per type against
+  distance), `contacts_<source>_pairs.csv` (occupancy of every residue pair and type),
+  `contacts_<source>.json` (bound-state inventory, distance where half the contacts are
+  lost, hotspots = residues that let go last, contacts left over the last 0.3 nm).
+* Per run: `analysis/contacts_summary.csv` and, per system and source,
+  `analysis/contacts_<system>_<source>.png` (types against distance; residue occupancy map).
+  The command prints the consensus hotspots (in at least two replicas) and flags
+  `PULL INCOMPLETE` when contacts remain over the last 0.3 nm of the path - the direct
+  check for the "profile still rising at the end of the pull" replicas.
+* Contacts are counted per residue pair and type; water bridges are not detected. Residue
+  labels are `T:ARG25` / `B:LYS3` (target / binder; `T1:`, `T2:` when a group has several
+  chains). GetContacts lists the t-stacking axis criterion for both rings, which cannot
+  hold for perpendicular rings; here it must hold for one.
+* `MDAnalysis` is only needed to read the trajectories: `pip install 'cg-us[contacts]'`.
+  The geometry uses numpy and scipy. `contacts` can be queued (`--enqueue`, folder `analysis`).
+
 ## 0.18.0 — ClearML queue
 
 `cg-us prep|run|extend|analyze|all|bench ... --enqueue` submits the command to a
