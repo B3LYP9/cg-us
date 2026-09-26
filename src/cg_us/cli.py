@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import analysis, contacts, experiment, plots, prep, report, wham
+from . import analysis, calibration, contacts, experiment, plots, prep, report, wham
 from .backends import chaperong as chaperong_backend
 from .backends import direct as direct_backend
 from .backends.base import RunContext
@@ -497,13 +497,19 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--stride-smd", type=int, default=5, help="use every Nth pull frame (2 ps each)")
     ct.set_defaults(func=cmd_contacts)
 
+    cp = sub.add_parser("calplot", help="calibration plot: benchmark fit plus check systems (DF3, controls) from other runs")
+    cp.add_argument("--bench", required=True, help="benchmark run root (its analysis/systems.csv is fitted)")
+    cp.add_argument("--check", nargs="*", help="run roots whose systems with an experimental dG are drawn as check points")
+    cp.add_argument("--out", default="calibration_check.png")
+    cp.set_defaults(func=cmd_calplot)
+
     qq = sub.add_parser("queue", help="inspect the ClearML queue that --enqueue submits to")
     qq.add_argument("action", choices=["status"])
     qq.add_argument("--queue", default=None, help="queue name (default $CGUS_CLEARML_QUEUE or a100-1)")
     qq.set_defaults(func=cmd_queue)
 
     # documented on every command that can be queued; consumed in main() before parsing
-    for parser in (pr, r, x, a, al, b, ct):
+    for parser in (pr, r, x, a, al, b, ct, cp):
         parser.add_argument("--enqueue", action="store_true",
                             help="do not run now: submit the command to a ClearML queue, where it "
                                  "starts after the jobs already waiting (needs `pip install clearml`)")
@@ -567,6 +573,22 @@ def cmd_contacts(args) -> int:
         print(f"[contacts] {r['system']} rep{r['replica']} {r['source']}: "
               f"{r[contacts.ANY]} residue pairs bound, xi_half {r['xi_half_nm']}{flag}")
     return 1 if failed and len(rows) == 0 else 0
+
+
+def cmd_calplot(args) -> int:
+    out = Path(args.out)
+    try:
+        f, table = calibration.plot(args.bench, args.check or [], out)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[calplot] {exc}", file=sys.stderr)
+        return 1
+    print(f"[calplot] dG_calib = {f['a']:.3f} * dG_calc {f['b']:+.2f}  (n={f['n']}, RMSE {f['rmse']:.2f}, "
+          f"LOO {f['loo_rmse']:.2f}, r {f['r']:.2f})")
+    for r in table.itertuples():
+        print(f"[calplot] {r.set:22s} {r.system:32s} exp {r.dg_exp:7.2f}  calib {r.dG_calib:7.2f}  "
+              f"error {r.error:+.2f}  ({r.n_replicas} replicas)")
+    print(f"[calplot] figure {out}, table {out.with_suffix('.csv')}")
+    return 0
 
 
 def cmd_queue(args) -> int:

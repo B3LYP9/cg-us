@@ -25,10 +25,10 @@ DEFAULT_PROJECT = "GP20181"
 # every queued task lives in <project>/<FOLDER>/<subfolder of its command>
 FOLDER = "Umbrella sampling"
 SUBFOLDER = {"run": "run", "prep": "run", "all": "run", "bench": "run",
-             "analyze": "analysis", "contacts": "analysis", "extend": "extend"}
+             "analyze": "analysis", "contacts": "analysis", "calplot": "analysis", "extend": "extend"}
 LAUNCHER = Path(__file__).with_name("_clearml_launcher.py")
 PARAM_SECTION = "cgus"
-QUEUEABLE = ("prep", "run", "extend", "analyze", "contacts", "all", "bench")
+QUEUEABLE = ("prep", "run", "extend", "analyze", "contacts", "calplot", "all", "bench")
 
 # flags consumed here, never passed on to the command the task runs
 _OWN_FLAGS_WITH_VALUE = ("--queue", "--task-name", "--project")

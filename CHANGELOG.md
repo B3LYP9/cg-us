@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.0 — calibration plot with check points
+
+`cg-us calplot --bench runs/big_bench --check runs/gdf8_smoketest runs/prodomain_arm_gdf8 --out reports/calibration/x.png`
+fits dG_calib = a*dG_calc + b on the benchmark systems (those with an experimental dG, without
+the negative controls and the native-ligand references), draws them with the +-LOO band and the
+negative-control band, and adds every system with an experimental dG in the `--check` roots as
+a check point outside the fit (as DF3 was), plus the references. It prints and saves (`.csv`)
+the experiment, the calibrated estimate and the error of each check point. Everything is read
+from each root's `analysis/systems.csv`, so it can be queued (`--enqueue`, folder `analysis`)
+behind the `analyze` that produces the numbers.
+
 ## 0.19.2 — gap filling survives a replica whose base mdp lost its pbcatom lines
 
 `extend --fill-gaps` on gdf8_df3 rep1 failed in grompp for the new window ("Pull group 1 ...
