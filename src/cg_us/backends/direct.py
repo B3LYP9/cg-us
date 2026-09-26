@@ -21,7 +21,7 @@ import numpy as np
 from .. import integration as UI
 from .. import windows as win
 from ..xvg import read_xvg
-from .base import (Gmx, GmxError, RunContext, available_cores, build_index,
+from .base import (PBCATOM_RE, Gmx, GmxError, RunContext, available_cores, build_index,
                    check_minimisation, effective_max_distance, pull_pbcatoms,
                    setup_restraints, threads_per_worker, verify_cyclisation,
                    verify_pull_range, window_files, write_pull_pbcatoms,
@@ -347,6 +347,7 @@ def fill_gaps(ctx: RunContext, threshold: float | None = None,
     if max_new is not None and max_new >= 0:
         gaps = sorted(gaps, key=lambda g: g["overlap"])[:max_new]
 
+    ensure_pbcatoms(ctx)
     frames, dists = win.read_distance_summary(wd / "distances_summary.txt")
     windows_json = json.loads((wd / "windows.json").read_text())
     existing = windows_json["windows"]
@@ -381,6 +382,11 @@ def fill_gaps(ctx: RunContext, threshold: float | None = None,
     failed = [r for r in results if "error" in r]
     records = [r for r in results if "error" not in r]
     if failed:
+        # a window that never ran must not stay in windows.json: it would pin a reference
+        # nobody samples and mark its frame as used, so the next attempt would skip that frame
+        gone = {f["window"] for f in failed}
+        windows_json["windows"] = [w for w in windows_json["windows"] if w["window"] not in gone]
+        (wd / "windows.json").write_text(json.dumps(windows_json, indent=2))
         _report_failures(ctx, failed)
 
     old_records = json.loads((wd / "window_records.json").read_text())
@@ -417,6 +423,24 @@ def _guarded_window(ctx: RunContext, w: dict, slot: int, workers: int) -> dict:
         except GmxError as exc:
             first = str(exc)
     return {"window": window, "frame": frame, "error": first}
+
+
+def ensure_pbcatoms(ctx: RunContext) -> None:
+    """Put the pull reference atoms back into the base umbrella mdp files if they are missing.
+
+    `run` writes `pull_groupN_pbcatom` into md_pull/npt_umbrella/md_umbrella after the index
+    step. A later `prep` on the same replica rewrites those base files from the templates and
+    drops the lines, and a window derived from them (a gap-filling window, a retry) then dies
+    in grompp with "Pull group 1 ... does not have a specific atom selected as reference atom"
+    (seen on gdf8_df3 rep1). Windows already sampled carry their own mdp copies and are fine.
+    """
+    if not ctx.proto.prep.pull_pbcatom:
+        return
+    base = [ctx.workdir / n for n in ("npt_umbrella.mdp", "md_umbrella.mdp")]
+    if all(PBCATOM_RE.search(p.read_text()) for p in base if p.exists()):
+        return
+    print("      [fix] base umbrella mdp files lack pull_pbcatom lines; rewriting them")
+    write_pull_pbcatoms(ctx, pull_pbcatoms(ctx, "solv_ions.gro"))
 
 
 def _report_failures(ctx: RunContext, failed: list[dict]) -> None:

@@ -1592,3 +1592,28 @@ def test_ensure_frame_rebuilds_only_missing_smd_frames(tmp_path):
 
     with pytest.raises(direct.GmxError):
         direct.ensure_frame(FakeGmx(), wd, 99)          # beyond the pull trajectory
+
+
+def test_ensure_pbcatoms_repairs_base_mdp_files_only_when_needed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from cg_us.backends import direct
+
+    ctx = SimpleNamespace(workdir=tmp_path, proto=SimpleNamespace(prep=SimpleNamespace(pull_pbcatom=True)))
+    (tmp_path / "npt_umbrella.mdp").write_text("pull = yes\npull_pbc_ref_prev_step_com = yes\n")
+    (tmp_path / "md_umbrella.mdp").write_text("pull = yes\n")
+    calls = []
+    monkeypatch.setattr(direct, "pull_pbcatoms", lambda c, gro: calls.append(gro) or {"Target": 1681, "Binder": 3480})
+
+    direct.ensure_pbcatoms(ctx)
+    assert calls == ["solv_ions.gro"]
+    for name in ("npt_umbrella.mdp", "md_umbrella.mdp"):
+        text = (tmp_path / name).read_text()
+        assert "pull_group1_pbcatom = 1681" in text and "pull_group2_pbcatom = 3480" in text
+
+    direct.ensure_pbcatoms(ctx)                      # lines present: nothing is recomputed or rewritten
+    assert calls == ["solv_ions.gro"]
+
+    ctx.proto.prep.pull_pbcatom = False
+    (tmp_path / "md_umbrella.mdp").write_text("pull = yes\n")
+    direct.ensure_pbcatoms(ctx)                      # disabled in the protocol: left alone
+    assert "pbcatom" not in (tmp_path / "md_umbrella.mdp").read_text()

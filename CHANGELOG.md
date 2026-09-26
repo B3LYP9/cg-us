@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.2 — gap filling survives a replica whose base mdp lost its pbcatom lines
+
+`extend --fill-gaps` on gdf8_df3 rep1 failed in grompp for the new window ("Pull group 1 ...
+does not have a specific atom selected as reference atom"): a later `prep` on that replica
+had rewritten `npt_umbrella.mdp` / `md_umbrella.mdp` from the templates, and the pbcatom lines
+that `run` adds after the index step were gone (the other 20 replicas of the root were fine).
+The new window is derived from those base files, so it inherited the gap.
+
+* `direct.ensure_pbcatoms` restores the `pull_groupN_pbcatom` lines in the base umbrella mdp
+  files when they are missing (same values `run` computes); `fill_gaps` calls it first.
+* A window that fails during gap filling is removed from `windows.json` again, so it neither
+  pins a reference nobody samples nor marks its frame as used for the next attempt.
+
 ## 0.19.1 — SMD frames can be deleted
 
 `coordinates_SMD` (1251 `.gro` frames, about 3 GB per replica) is read only to start a
