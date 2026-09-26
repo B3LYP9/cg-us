@@ -93,8 +93,15 @@ def _chain_order(entry: Entry, reports: dict[str, structure.ChainReport]) -> lis
     return cyclic + [ch for ch in chains if ch not in cyclic]
 
 
+def existing_replicas(root: str | Path, entry: Entry) -> list[int]:
+    """Numbers of the replica directories already present for this system."""
+    return sorted(int(d.name[3:]) for d in system_dir(root, entry).glob("rep[0-9]*") if d.name[3:].isdigit())
+
+
 def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
-                  ff_source: str | Path | None = None) -> dict:
+                  ff_source: str | Path | None = None, replicas=None) -> dict:
+    """Write the input tree of a system. `replicas` limits which replica numbers are written
+    (default: 1..proto.replicas); the ones not listed are left exactly as they are."""
     sysdir = system_dir(root, entry)
     sysdir.mkdir(parents=True, exist_ok=True)
 
@@ -162,7 +169,7 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
 
     ff_local = materialise_forcefield(ff_source, Path(root)) if ff_source else []
 
-    for rep in range(1, proto.replicas + 1):
+    for rep in (replicas if replicas is not None else range(1, proto.replicas + 1)):
         rdir = replica_dir(root, entry, rep)
         rdir.mkdir(parents=True, exist_ok=True)
         shutil.copy(input_pdb, rdir / f"{entry.name}.pdb")
@@ -176,6 +183,9 @@ def prepare_entry(entry: Entry, proto: Protocol, root: str | Path,
             _link_forcefield(ff, rdir)
         info["replicas"].append({"replica": rep, "dir": str(rdir), "seed": seed})
 
+    if replicas is not None and (sysdir / "prep.json").exists():
+        old = json.loads((sysdir / "prep.json").read_text()).get("replicas", [])
+        info["replicas"] = [r for r in old if r["replica"] not in {x["replica"] for x in info["replicas"]}] + info["replicas"]
     (sysdir / "prep.json").write_text(json.dumps(info, indent=2))
     return info
 

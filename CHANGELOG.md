@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.20.1 — more replicas for an existing run
+
+`cg-us prep --manifest M --data-root D --root R --system S ... --add-replicas K` prepares K
+more replicas for each named system of a prepared root and touches nothing that exists (the
+old replica directories, `run_state.json`, `systems.csv`, the other systems). The new replicas
+use the root's own `protocol.yaml` (only `replicas` is raised) and get their own velocity
+seeds, so they start independent pulls. `cg-us run --root R --system S` then samples only the
+replicas that are not sampled yet. More replicas are the cheaper way to lower the between-replica
+scatter than lengthening windows: for 5 ns windows the dG moves by about 0.3 kcal/mol between
+the two halves of the sampling, while the replicas differ by several times that.
+
 ## 0.20.0 — calibration plot with check points
 
 `cg-us calplot --bench runs/big_bench --check runs/gdf8_smoketest runs/prodomain_arm_gdf8 --out reports/calibration/x.png`

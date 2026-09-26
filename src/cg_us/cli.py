@@ -48,7 +48,37 @@ def cmd_validate(args) -> int:
     return 0
 
 
+def cmd_add_replicas(args) -> int:
+    """Prepare K more replicas per system of an existing root, touching nothing that exists."""
+    root = Path(args.root)
+    if not (root / "protocol.yaml").exists():
+        print(f"[prep] {root} has no protocol.yaml: nothing to add replicas to", file=sys.stderr)
+        return 1
+    proto = Protocol.load(root / "protocol.yaml")          # the root's own protocol, not a new one
+    entries = read_manifest(args.manifest, args.data_root)
+    if args.system:
+        entries = [e for e in entries if e.name in args.system]
+    if not entries:
+        print("[prep] no manifest entry matched --system", file=sys.stderr)
+        return 1
+    top = proto.replicas
+    for e in entries:
+        have = prep.existing_replicas(root, e)
+        if not have:
+            print(f"[prep] {e.name}: not prepared in {root} yet, use a normal prep", file=sys.stderr)
+            return 1
+        new = list(range(have[-1] + 1, have[-1] + 1 + args.add_replicas))
+        prep.prepare_entry(e, proto, root, ff_source=args.ff_dir, replicas=new)
+        top = max(top, new[-1])
+        print(f"[prep] {e.name:<24} replicas {have[0]}-{have[-1]} kept, added {new[0]}-{new[-1]}")
+    proto.replicas = top
+    proto.dump(root / "protocol.yaml")
+    return 0
+
+
 def cmd_prep(args) -> int:
+    if getattr(args, "add_replicas", None):
+        return cmd_add_replicas(args)
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
     proto = Protocol.load(args.protocol)
@@ -401,6 +431,9 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--backend", choices=["chaperong", "direct"], default=None)
     pr.add_argument("--system", nargs="*", default=None,
                     help="rebuild only these manifest entries, leaving finished trees alone")
+    pr.add_argument("--add-replicas", type=int, default=None, metavar="K",
+                    help="add K replicas to each --system of an existing root (existing replicas, "
+                         "run_state and systems.csv are not touched); then `run --system ...` samples only the new ones")
     pr.set_defaults(func=cmd_prep)
 
     r = sub.add_parser("run", help="run the simulations")
